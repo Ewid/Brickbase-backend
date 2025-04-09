@@ -1,15 +1,7 @@
-import { Controller, Get, Param, Query, Logger } from '@nestjs/common';
+import { Controller, Get, Param, Query, Logger, ParseIntPipe } from '@nestjs/common';
 import { MarketplaceService } from './marketplace.service';
-import { HistoricalSale } from './entities/historical-sale.entity';
-
-// Basic DTOs
-class ListingDto {
-  // Define based on contract return type
-  id: number;
-  // ... other listing details
-}
-
-class PriceHistoryDto extends HistoricalSale {}
+import { ListingDto } from './dto/listing.dto';
+import { PriceHistoryDto } from './dto/price-history.dto';
 
 @Controller('marketplace')
 export class MarketplaceController {
@@ -24,10 +16,9 @@ export class MarketplaceController {
   }
 
    @Get('listings/:id')
-   async findListingById(@Param('id') id: string): Promise<ListingDto | null> {
+   async findListingById(@Param('id', ParseIntPipe) id: number): Promise<ListingDto | null> {
      this.logger.log(`GET /marketplace/listings/${id} called`);
-     // Assuming listing ID is a number based on service method
-     return this.marketplaceService.getListingDetails(parseInt(id, 10));
+     return this.marketplaceService.getListingDetails(id);
    }
 
   @Get('price-history')

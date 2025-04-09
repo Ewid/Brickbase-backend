@@ -1,10 +1,8 @@
 import { Controller, Get, Query, Logger } from '@nestjs/common';
 import { RentService } from './rent.service';
+import { ClaimableRentDto } from './dto/claimable-rent.dto';
 
-// Basic DTO
-class ClaimableRentDto {
-  amount: string; // BigNumber string
-}
+// Define validation rules for addresses if needed (e.g., using a custom decorator or regex)
 
 @Controller('rent')
 export class RentController {
@@ -19,6 +17,7 @@ export class RentController {
   ): Promise<ClaimableRentDto> {
     this.logger.log(`GET /rent/claimable?userAddress=${userAddress}&tokenAddress=${tokenAddress} called`);
     const amount = await this.rentService.getClaimableRent(userAddress, tokenAddress);
+    // Directly return object conforming to DTO structure
     return { amount };
   }
 
