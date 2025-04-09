@@ -8,38 +8,50 @@ import { Contract } from 'ethers';
 @Injectable()
 export class DaoService {
   private readonly logger = new Logger(DaoService.name);
-  private propertyDAO: Contract;
 
   constructor(
     @InjectRepository(ExpenseRecord)
     private expenseRecordRepository: Repository<ExpenseRecord>,
     private blockchainService: BlockchainService,
   ) {
-     this.propertyDAO = this.blockchainService.getContract('propertyDAO');
   }
 
   async getDaoProposals(): Promise<any[]> {
     this.logger.log('Fetching DAO proposals...');
-     if (!this.propertyDAO) {
-        this.logger.error('PropertyDAO contract not initialized');
+    const propertyDAO = this.blockchainService.getContract('propertyDAO');
+
+     if (!propertyDAO) {
+        this.logger.error('PropertyDAO contract not available from BlockchainService');
         return [];
      }
-    // Example: Fetch proposals from contract
-    // const proposals = await this.propertyDAO.getAllProposals(); // Replace with actual method
-    // return proposals;
-    return []; // Placeholder
+    try {
+        // Example: Fetch proposals from contract
+        // const proposals = await propertyDAO.getAllProposals(); // Replace with actual method
+        // return proposals;
+        return []; // Placeholder
+    } catch (error) {
+        this.logger.error(`Error fetching DAO proposals: ${error.message}`);
+        return [];
+    }
   }
 
   async getProposalDetails(proposalId: number): Promise<any | null> {
     this.logger.log(`Fetching details for proposal ${proposalId}...`);
-     if (!this.propertyDAO) {
-        this.logger.error('PropertyDAO contract not initialized');
+    const propertyDAO = this.blockchainService.getContract('propertyDAO');
+
+     if (!propertyDAO) {
+        this.logger.error('PropertyDAO contract not available from BlockchainService');
         return null;
      }
-    // Example: Fetch single proposal
-    // const proposal = await this.propertyDAO.proposals(proposalId); // Replace with actual method
-    // return proposal;
-    return { id: proposalId }; // Placeholder
+    try {
+        // Example: Fetch single proposal
+        // const proposal = await propertyDAO.proposals(proposalId); // Replace with actual method
+        // return proposal;
+        return { id: proposalId }; // Placeholder
+    } catch (error) {
+        this.logger.error(`Error fetching proposal details for ${proposalId}: ${error.message}`);
+        return null;
+    }
   }
 
   async getExpenseProposals(propertyNftId?: string): Promise<ExpenseRecord[]> {
@@ -48,7 +60,12 @@ export class DaoService {
     if (propertyNftId) {
       whereClause.propertyNftId = propertyNftId;
     }
-    return this.expenseRecordRepository.find({ where: whereClause });
+    try {
+        return this.expenseRecordRepository.find({ where: whereClause });
+    } catch (error) {
+        this.logger.error(`Error fetching expense proposals from database: ${error.message}`);
+        return [];
+    }
   }
 
   // TODO: Implement event listeners for ProposalCreated (especially for expenses)

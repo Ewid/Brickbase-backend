@@ -9,6 +9,7 @@ import { DaoModule } from './modules/dao/dao.module';
 import { InstallmentsModule } from './modules/installments/installments.module';
 import { BlockchainModule } from './modules/blockchain/blockchain.module';
 import { DatabaseModule } from './modules/database/database.module';
+import { join } from 'path';
 
 @Module({
   imports: [
@@ -21,7 +22,7 @@ import { DatabaseModule } from './modules/database/database.module';
       useFactory: (configService: ConfigService) => ({
         type: 'postgres',
         url: configService.get<string>('DATABASE_URL'),
-        entities: [__dirname + '/../**/*.entity.{js,ts}'],
+        entities: [join(__dirname, '**', '*.entity.js')],
         synchronize: true,
       }),
       inject: [ConfigService],

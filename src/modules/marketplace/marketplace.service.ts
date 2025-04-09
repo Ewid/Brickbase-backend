@@ -8,46 +8,64 @@ import { Contract } from 'ethers';
 @Injectable()
 export class MarketplaceService {
   private readonly logger = new Logger(MarketplaceService.name);
-  private propertyMarketplace: Contract;
 
   constructor(
     @InjectRepository(HistoricalSale)
     private historicalSaleRepository: Repository<HistoricalSale>,
     private blockchainService: BlockchainService,
   ) {
-    this.propertyMarketplace = this.blockchainService.getContract('propertyMarketplace');
   }
 
   async findAllListings(): Promise<any[]> {
     this.logger.log('Fetching all active listings...');
-    if (!this.propertyMarketplace) {
-        this.logger.error('PropertyMarketplace contract not initialized');
+    const propertyMarketplace = this.blockchainService.getContract('propertyMarketplace');
+
+    if (!propertyMarketplace) {
+        this.logger.error('PropertyMarketplace contract not available from BlockchainService');
         return [];
     }
-    // Example: Call contract to get active listings
-    // const listings = await this.propertyMarketplace.getActiveListings(); // Replace with actual method
-    // return listings;
-    return []; // Placeholder
+    try {
+        // Example: Call contract to get active listings
+        // const listings = await propertyMarketplace.getActiveListings(); // Replace with actual method
+        // return listings;
+        return []; // Placeholder
+    } catch (error) {
+        this.logger.error(`Error fetching listings: ${error.message}`);
+        return [];
+    }
   }
 
   async getListingDetails(listingId: number): Promise<any | null> {
      this.logger.log(`Fetching details for listing ${listingId}...`);
-      if (!this.propertyMarketplace) {
-          this.logger.error('PropertyMarketplace contract not initialized');
+     const propertyMarketplace = this.blockchainService.getContract('propertyMarketplace');
+
+      if (!propertyMarketplace) {
+          this.logger.error('PropertyMarketplace contract not available from BlockchainService');
           return null;
       }
-     // Example: Call contract
-     // const listing = await this.propertyMarketplace.getListing(listingId); // Replace with actual method
-     // return listing;
-     return { id: listingId }; // Placeholder
+    try {
+         // Example: Call contract
+         // const listing = await propertyMarketplace.getListing(listingId); // Replace with actual method
+         // return listing;
+         return { id: listingId }; // Placeholder
+     } catch (error) {
+         this.logger.error(`Error fetching listing details for ${listingId}: ${error.message}`);
+         return null;
+     }
   }
 
   async getPriceHistory(propertyNftId: string): Promise<HistoricalSale[]> {
     this.logger.log(`Fetching price history for property NFT ${propertyNftId}...`);
-    return this.historicalSaleRepository.find({
-      where: { propertyNftId },
-      order: { timestamp: 'ASC' },
-    });
+    // This method doesn't need the contract, only the repository
+    try {
+        return this.historicalSaleRepository.find({
+          where: { propertyNftId },
+          order: { timestamp: 'ASC' },
+        });
+    } catch (error) {
+        this.logger.error(`Error fetching price history from database: ${error.message}`);
+        return [];
+    }
   }
 
   // TODO: Implement event listener for ListingPurchased events
