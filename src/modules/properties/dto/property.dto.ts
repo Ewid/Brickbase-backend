@@ -1,9 +1,12 @@
-import { IsString, IsObject, IsNotEmpty } from 'class-validator';
+import { IsString, IsObject, IsNotEmpty, IsNumber } from 'class-validator';
 
 export class PropertyDto {
   @IsString()
   @IsNotEmpty()
-  id: string; // The NFT ID
+  id: string; // The NFT Contract Address
+
+  @IsNumber()
+  tokenId: number;
 
   @IsObject()
   metadata: any; // Define more strictly based on actual metadata structure
