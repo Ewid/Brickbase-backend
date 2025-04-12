@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { BlockchainService } from '../blockchain/blockchain.service';
+import { PropertiesService } from '../properties/properties.service';
 import { ExpenseRecord, ExpenseStatus } from './entities/expense-record.entity';
 import { ethers, Contract, Log, EventLog, ZeroAddress } from 'ethers';
 import { ProposalDto } from './dto/proposal.dto';
@@ -14,6 +15,7 @@ export class DaoService implements OnModuleInit {
     @InjectRepository(ExpenseRecord)
     private expenseRecordRepository: Repository<ExpenseRecord>,
     private blockchainService: BlockchainService,
+    private propertiesService: PropertiesService,
   ) {
   }
 
@@ -125,28 +127,45 @@ export class DaoService implements OnModuleInit {
         if (isExpenseProposal) {
             this.logger.log(`Identified potential expense proposal: ${proposalIdNum}`);
             try {
-                const parsedAmount = 100;
-                const parsedCurrency = 'USD';
-                const parsedPropertyNftId = 'N/A';
-
                 const existingRecord = await this.expenseRecordRepository.findOne({ where: { daoProposalId: proposalIdNum.toString() } });
                 if (existingRecord) {
                     this.logger.log(`Expense record for proposal ${proposalIdNum} already exists.`);
                     return;
                 }
+                
+                let propertyNftId = 'N/A';
+                try {
+                    const daoTokenAddress = await (propertyDAO as any).propertyToken();
+                    if (daoTokenAddress && daoTokenAddress !== ZeroAddress) {
+                        const nftDetails = await this.propertiesService.findNftDetailsByTokenAddress(daoTokenAddress);
+                        if (nftDetails) {
+                            propertyNftId = nftDetails.nftAddress; 
+                            this.logger.log(`Found associated NFT Address ${propertyNftId} for DAO token ${daoTokenAddress}`);
+                        } else {
+                            this.logger.warn(`Could not find NFT details associated with DAO token ${daoTokenAddress}`);
+                        }
+                    } else {
+                        this.logger.warn('DAO contract propertyToken address is zero or invalid.');
+                    }
+                } catch (lookupError) {
+                    this.logger.error(`Error looking up NFT details for DAO token: ${lookupError.message}`);
+                }
+
+                const parsedAmount = 100;
+                const parsedCurrency = 'USD';
 
                 const expense = this.expenseRecordRepository.create({
                     daoProposalId: proposalIdNum.toString(),
-                    propertyNftId: parsedPropertyNftId,
+                    propertyNftId: propertyNftId,
                     description: description,
                     amount: parsedAmount,
                     currency: parsedCurrency,
                     status: ExpenseStatus.PENDING,
                 });
                 await this.expenseRecordRepository.save(expense);
-                this.logger.log(`Saved new expense record for proposal ${proposalIdNum}`);
+                this.logger.log(`Saved new expense record for proposal ${proposalIdNum} (Property NFT ID: ${propertyNftId})`);
             } catch (error) {
-                this.logger.error(`Error processing ProposalCreated event for expense: ${error.message}`);
+                this.logger.error(`Error processing ProposalCreated event ${proposalIdNum} for expense: ${error.message}`);
             }
         }
     });
