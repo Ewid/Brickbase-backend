@@ -21,6 +21,12 @@ export class PropertiesController {
     return this.propertiesService.getPropertyDetailsByTokenAddress(address);
   }
 
+  @Get('owned/:address')
+  async getPropertiesOwnedByUser(@Param('address') address: string): Promise<any[]> {
+    this.logger.log(`GET /properties/owned/${address} called`);
+    return this.propertiesService.findPropertiesOwnedByUser(address);
+  }
+
   @Get(':id')
   // Assuming property ID (NFT ID) is not necessarily a UUID, keep as string for now.
   // If it *is* a UUID, use `@Param('id', ParseUUIDPipe) id: string`

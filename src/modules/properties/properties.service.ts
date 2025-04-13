@@ -245,4 +245,30 @@ export class PropertiesService {
     // Get the property details using the NFT address and token ID
     return this.getPropertyDetails(nftDetails.nftAddress, nftDetails.tokenId);
   }
+
+  async findPropertiesOwnedByUser(address: string): Promise<any[]> {
+    this.logger.log(`Finding properties owned by ${address}`);
+    const allProperties = await this.findAllProperties();
+    const ownedProperties = [];
+    
+    for (const property of allProperties) {
+      try {
+        const tokenContract = this.blockchainService.getPropertyTokenByAddress(property.tokenAddress);
+        if (tokenContract) {
+          const balance = await tokenContract.balanceOf(address);
+          if (balance > BigInt(0)) {
+            ownedProperties.push({
+              ...property,
+              balance: balance.toString()
+            });
+          }
+        }
+      } catch (error) {
+        this.logger.error(`Error checking balance for property ${property.id}: ${error.message}`);
+      }
+    }
+    
+    return ownedProperties;
+  }
 }
+
