@@ -54,13 +54,12 @@ export class PropertiesService {
     }
   }
 
-  // Updated helper to accept tokenId
+  // Updated formatProperty method to include tokenAddress from the registry
   private async formatProperty(propertyData: RegisteredProperty, tokenId: number): Promise<PropertyDto | null> {
     const propertyNFTContract = this.blockchainService.getContract('propertyNFT');
-    const propertyTokenBase = this.blockchainService.getContract('propertyToken');
 
-    if (!propertyNFTContract || !propertyTokenBase) {
-      this.logger.error('NFT or Token contract instance not available for formatting');
+    if (!propertyNFTContract) {
+      this.logger.error('NFT contract instance not available for formatting');
       return null;
     }
 
@@ -71,14 +70,25 @@ export class PropertiesService {
     }
 
     try {
+      // Get the specific token contract for this property
+      const propertyTokenContract = this.blockchainService.getPropertyTokenByAddress(tokenAddress);
+
+      if (!propertyTokenContract) {
+        this.logger.error(`Token contract not available for ${tokenAddress}`);
+        return null;
+      }
+
+      // Fetch the token URI and metadata
       const tokenURI = await (propertyNFTContract as any).tokenURI(tokenId);
+      this.logger.debug(`Token URI for NFT ${propertyData.propertyNFT}, ID ${tokenId}: ${tokenURI}`);
+      
       const metadata = await this.fetchMetadata(tokenURI);
-      const propertyTokenContract = propertyTokenBase.attach(tokenAddress);
-      const totalSupply = await (propertyTokenContract as any).totalSupply();
+      const totalSupply = await propertyTokenContract.totalSupply();
 
       return {
         id: propertyData.propertyNFT, // NFT contract address
         tokenId: tokenId,
+        tokenAddress: tokenAddress, // Include the specific token address
         metadata: metadata,
         totalSupply: totalSupply.toString(),
       };
@@ -88,173 +98,151 @@ export class PropertiesService {
     }
   }
 
+  // Modified to check for property tokens in registry directly
   async findAllProperties(): Promise<PropertyDto[]> {
     this.logger.log('Fetching all registered properties...');
     const propertyRegistry = this.blockchainService.getContract('propertyRegistry');
-    const propertyNFTBase = this.blockchainService.getContract('propertyNFT'); // Get the base ABI instance
+    const propertyNFT = this.blockchainService.getContract('propertyNFT');
 
-    if (!propertyRegistry || !propertyNFTBase) {
-      this.logger.error('PropertyRegistry or base PropertyNFT contract not available');
+    if (!propertyRegistry || !propertyNFT) {
+      this.logger.error('PropertyRegistry or PropertyNFT contract not available');
       return [];
     }
 
     try {
+      // Get all properties from the registry
       const allRegisteredProps: RegisteredProperty[] = await (propertyRegistry as any).getAllProperties();
-      this.logger.log(`Found ${allRegisteredProps.length} registered PropertyNFT contract(s) in registry.`);
+      this.logger.log(`Found ${allRegisteredProps.length} registered properties in registry.`);
 
       const allProperties: PropertyDto[] = [];
 
-      // Iterate through each registered NFT contract address
-      for (const propStruct of allRegisteredProps) {
+      // For each property in the registry, get its details
+      for (let i = 0; i < allRegisteredProps.length; i++) {
+        const propStruct = allRegisteredProps[i];
+        
         if (!propStruct.isActive) {
-            this.logger.log(`Skipping inactive property registration: ${propStruct.propertyNFT}`);
-            continue;
+          this.logger.log(`Skipping inactive property registration at index ${i}`);
+          continue;
         }
 
-        this.logger.log(`Processing registered NFT contract: ${propStruct.propertyNFT}`);
-        const specificNftContract = propertyNFTBase.attach(propStruct.propertyNFT);
-        let currentTokenId = 0;
-        let owner;
-
-        // Iterate through token IDs for this specific NFT contract
-        while (true) {
-          try {
-            // Check if token exists by calling ownerOf
-            owner = await (specificNftContract as any).ownerOf(currentTokenId);
-            this.logger.debug(`Token ID ${currentTokenId} exists for NFT ${propStruct.propertyNFT}, owned by ${owner}. Formatting...`);
-
-            // If ownerOf succeeds, format the property details for this tokenId
-            const formattedProperty = await this.formatProperty(propStruct, currentTokenId);
-            if (formattedProperty) {
-              allProperties.push(formattedProperty);
-            }
-            currentTokenId++;
-          } catch (error) {
-            // Assuming error means tokenId does not exist (standard ERC721 behavior)
-            if (error.code === 'CALL_EXCEPTION') { // Ethers v6 specific error code for reverted call
-                this.logger.debug(`Token ID ${currentTokenId} does not exist for NFT ${propStruct.propertyNFT}. Stopping iteration for this contract.`);
-                break; // Exit the while loop for this contract
-            } else {
-                 this.logger.error(`Unexpected error checking ownerOf(${currentTokenId}) for NFT ${propStruct.propertyNFT}: ${error.message}`);
-                 break; // Exit loop on unexpected errors too
-            }
+        this.logger.log(`Processing property at index ${i}: NFT ${propStruct.propertyNFT}, Token ${propStruct.propertyToken}`);
+        
+        try {
+          // The tokenId is the index in the registry
+          const formattedProperty = await this.formatProperty(propStruct, i);
+          if (formattedProperty) {
+            allProperties.push(formattedProperty);
           }
+        } catch (error) {
+          this.logger.error(`Error processing property at index ${i}: ${error.message}`);
         }
       }
 
-      this.logger.log(`Formatted ${allProperties.length} total active property tokens.`);
+      this.logger.log(`Successfully formatted ${allProperties.length} active properties.`);
       return allProperties;
     } catch (error) {
-        this.logger.error(`Error in findAllProperties: ${error.message}`);
-        return [];
+      this.logger.error(`Error in findAllProperties: ${error.message}`);
+      return [];
     }
   }
 
-  async getPropertyDetails(nftAddress: string): Promise<PropertyDto | null> {
-    this.logger.log(`Fetching details for specific property NFT address ${nftAddress}...`);
+  // Updated to accept tokenId as parameter
+  async getPropertyDetails(nftAddress: string, tokenId?: number): Promise<PropertyDto | null> {
+    this.logger.log(`Fetching details for property NFT address ${nftAddress}${tokenId !== undefined ? `, tokenId: ${tokenId}` : ''}`);
     const propertyRegistry = this.blockchainService.getContract('propertyRegistry');
 
     if (!propertyRegistry) {
-        this.logger.error('PropertyRegistry contract not available from BlockchainService');
-        return null;
-    }
-
-    try {
-        const indexBigInt: bigint = await (propertyRegistry as any).propertyIndex(nftAddress);
-        const registryIndex = Number(indexBigInt);
-
-        if (registryIndex === 0) {
-            this.logger.warn(`Property NFT address ${nftAddress} not found in registry index.`);
-            return null;
-        }
-
-        const likelyTokenId = registryIndex - 1;
-        const propertyData: RegisteredProperty = await (propertyRegistry as any).registeredProperties(likelyTokenId);
-
-        if (!propertyData || propertyData.propertyNFT.toLowerCase() !== nftAddress.toLowerCase() || !propertyData.isActive) {
-             this.logger.warn(`Property data mismatch or inactive for NFT address ${nftAddress} at index ${likelyTokenId}.`);
-             return null;
-        }
-
-        return this.formatProperty(propertyData, likelyTokenId);
-
-    } catch (error) {
-        this.logger.error(`Error fetching details for NFT ${nftAddress}: ${error.message}`);
-        return null;
-    }
-  }
-
-  // New method to find NFT details by PropertyToken address
-  async findNftDetailsByTokenAddress(tokenAddress: string): Promise<{ nftAddress: string; tokenId: number } | null> {
-    this.logger.log(`Searching for NFT details associated with Token: ${tokenAddress}`);
-    const propertyRegistry = this.blockchainService.getContract('propertyRegistry');
-    const propertyNFTBase = this.blockchainService.getContract('propertyNFT'); // Base ABI
-
-    if (!propertyRegistry || !propertyNFTBase) {
-      this.logger.error('PropertyRegistry or base PropertyNFT contract not available for NFT detail lookup.');
+      this.logger.error('PropertyRegistry contract not available');
       return null;
     }
 
     try {
-      // 1. Find the RegisteredProperty struct that contains this tokenAddress
-      // Note: This requires iterating through all registered properties in the registry
-      // This could be inefficient if the registry grows very large.
-      // Consider adding a mapping (tokenAddress => nftAddress) in the registry contract if performance becomes an issue.
-      const allRegisteredProps: RegisteredProperty[] = await (propertyRegistry as any).getAllProperties();
-      let foundNftAddress: string | null = null;
-
-      for (const propStruct of allRegisteredProps) {
-        if (propStruct.isActive && propStruct.propertyToken.toLowerCase() === tokenAddress.toLowerCase()) {
-          foundNftAddress = propStruct.propertyNFT;
-          this.logger.debug(`Found matching active NFT contract in registry: ${foundNftAddress}`);
-          break;
+      // If tokenId is not provided, try to find it from the registry
+      if (tokenId === undefined) {
+        const indexBigInt: bigint = await (propertyRegistry as any).propertyIndex(nftAddress);
+        tokenId = Number(indexBigInt) - 1;
+        
+        if (tokenId < 0) {
+          this.logger.warn(`Property NFT address ${nftAddress} not found in registry index.`);
+          return null;
         }
       }
 
-      if (!foundNftAddress) {
-        this.logger.warn(`No active NFT contract found in registry associated with Token: ${tokenAddress}`);
+      // Get the property data from the registry
+      const propertyData: RegisteredProperty = await (propertyRegistry as any).registeredProperties(tokenId);
+
+      if (!propertyData || propertyData.propertyNFT.toLowerCase() !== nftAddress.toLowerCase() || !propertyData.isActive) {
+        this.logger.warn(`Property data mismatch or inactive for NFT address ${nftAddress} at index ${tokenId}.`);
         return null;
       }
 
-      // 2. Query the specific PropertyNFT contract to find the tokenId
-      const specificNftContract = propertyNFTBase.attach(foundNftAddress);
-      let currentTokenId = 0;
-      while (true) {
-        try {
-          // Call the public 'properties' mapping getter
-          const details: PropertyDetailsFromContract = await (specificNftContract as any).properties(currentTokenId);
+      return this.formatProperty(propertyData, tokenId);
+    } catch (error) {
+      this.logger.error(`Error fetching details for NFT ${nftAddress}: ${error.message}`);
+      return null;
+    }
+  }
 
-          // Check if the propertyToken in the details matches our target tokenAddress
-          if (details.propertyToken.toLowerCase() === tokenAddress.toLowerCase()) {
-            this.logger.log(`Found matching Token ID ${currentTokenId} on NFT contract ${foundNftAddress} for Token ${tokenAddress}`);
-            // Verify token existence by checking owner (optional but good practice)
-            try {
-                await (specificNftContract as any).ownerOf(currentTokenId);
-                return { nftAddress: foundNftAddress, tokenId: currentTokenId };
-            } catch (ownerError) {
-                 this.logger.warn(`Token ID ${currentTokenId} found in properties mapping but ownerOf failed. Skipping. Error: ${ownerError.message}`);
-                 // Continue searching other token IDs if owner check fails
-            }
-          }
-          currentTokenId++;
-        } catch (error) {
-          // Error likely means tokenId does not exist in the 'properties' mapping or contract call failed
-          if (error.code === 'CALL_EXCEPTION' || error.message?.includes('invalid token ID')) { // Adjust error checking as needed for your specific provider/contract version
-             this.logger.debug(`Stopped searching token IDs for NFT ${foundNftAddress} at index ${currentTokenId}. Reason: ${error.message}`);
-             break; // Stop searching this NFT contract
-          } else {
-            this.logger.error(`Unexpected error querying properties(${currentTokenId}) on NFT ${foundNftAddress}: ${error.message}`);
-            break; // Stop on unexpected errors
-          }
+  // Updated NFT details lookup that uses the registry more directly
+  async findNftDetailsByTokenAddress(tokenAddress: string): Promise<{ nftAddress: string; tokenId: number } | null> {
+    this.logger.log(`Searching for NFT details associated with Token: ${tokenAddress}`);
+    const propertyRegistry = this.blockchainService.getContract('propertyRegistry');
+
+    if (!propertyRegistry) {
+      this.logger.error('PropertyRegistry contract not available for NFT detail lookup.');
+      return null;
+    }
+
+    try {
+      // Get mapping from token to property directly from the registry if available
+      try {
+        // This would be ideal if your registry has this function
+        const propertyInfo = await (propertyRegistry as any).getPropertyByToken(tokenAddress);
+        if (propertyInfo && propertyInfo.propertyNFT && propertyInfo.propertyNFT !== ZeroAddress) {
+          this.logger.log(`Found property directly for token ${tokenAddress}: NFT ${propertyInfo.propertyNFT}, tokenId ${propertyInfo.tokenId}`);
+          return { 
+            nftAddress: propertyInfo.propertyNFT, 
+            tokenId: Number(propertyInfo.tokenId) 
+          };
+        }
+      } catch (directLookupError) {
+        // If direct lookup isn't available, fall back to iteration
+        this.logger.debug(`Direct property lookup not available, falling back to iteration: ${directLookupError.message}`);
+      }
+
+      // Fallback: Iterate through all registered properties
+      const allRegisteredProps: RegisteredProperty[] = await (propertyRegistry as any).getAllProperties();
+      
+      for (let i = 0; i < allRegisteredProps.length; i++) {
+        const propStruct = allRegisteredProps[i];
+        
+        if (propStruct.isActive && propStruct.propertyToken.toLowerCase() === tokenAddress.toLowerCase()) {
+          this.logger.debug(`Found matching NFT address ${propStruct.propertyNFT} at index ${i} for token ${tokenAddress}`);
+          return { nftAddress: propStruct.propertyNFT, tokenId: i };
         }
       }
 
-      this.logger.warn(`Could not find a specific Token ID on NFT ${foundNftAddress} matching Token ${tokenAddress}`);
-      return null; // Token ID not found for this token address on the associated NFT contract
-
+      this.logger.warn(`No matching property found for token address ${tokenAddress}`);
+      return null;
     } catch (error) {
       this.logger.error(`Error in findNftDetailsByTokenAddress for ${tokenAddress}: ${error.message}`);
       return null;
     }
+  }
+
+  // Get property by token address directly
+  async getPropertyDetailsByTokenAddress(tokenAddress: string): Promise<PropertyDto | null> {
+    this.logger.log(`Fetching property details by token address ${tokenAddress}`);
+    
+    // Find the NFT details for this token
+    const nftDetails = await this.findNftDetailsByTokenAddress(tokenAddress);
+    
+    if (!nftDetails) {
+      this.logger.warn(`No NFT details found for token address ${tokenAddress}`);
+      return null;
+    }
+    
+    // Get the property details using the NFT address and token ID
+    return this.getPropertyDetails(nftDetails.nftAddress, nftDetails.tokenId);
   }
 }

@@ -11,11 +11,17 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
   private providerReady = false;
   public contracts: {
     propertyToken?: Contract;
+    propertyTokenFactory?: Contract;
     propertyNFT?: Contract;
     propertyRegistry?: Contract;
     rentDistribution?: Contract;
     propertyMarketplace?: Contract;
     propertyDAO?: Contract;
+    // Individual property tokens
+    mbvToken?: Contract;
+    mlcToken?: Contract;
+    sfmtToken?: Contract;
+    cdpToken?: Contract;
   } = {};
 
   constructor(private configService: ConfigService) {}
@@ -60,12 +66,17 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
     }
     const abiDirectory = path.join(__dirname, '../../abis'); // Assumes abis folder is at dist/abis
     const contractConfigs = [
-      { name: 'propertyToken', addressEnv: 'PROPERTY_TOKEN_ADDRESS', abiFile: 'PropertyToken.json' },
+      { name: 'propertyTokenFactory', addressEnv: 'PROPERTY_TOKEN_FACTORY_ADDRESS', abiFile: 'PropertyTokenFactory.json' },
       { name: 'propertyNFT', addressEnv: 'PROPERTY_NFT_ADDRESS', abiFile: 'PropertyNFT.json' },
       { name: 'propertyRegistry', addressEnv: 'PROPERTY_REGISTRY_ADDRESS', abiFile: 'PropertyRegistry.json' },
       { name: 'rentDistribution', addressEnv: 'RENT_DISTRIBUTION_ADDRESS', abiFile: 'RentDistribution.json' },
       { name: 'propertyMarketplace', addressEnv: 'PROPERTY_MARKETPLACE_ADDRESS', abiFile: 'PropertyMarketplace.json' },
       { name: 'propertyDAO', addressEnv: 'PROPERTY_DAO_ADDRESS', abiFile: 'PropertyDAO.json' },
+      // Individual property tokens (all use PropertyToken ABI)
+      { name: 'mbvToken', addressEnv: 'MBV_TOKEN_ADDRESS', abiFile: 'PropertyToken.json' },
+      { name: 'mlcToken', addressEnv: 'MLC_TOKEN_ADDRESS', abiFile: 'PropertyToken.json' },
+      { name: 'sfmtToken', addressEnv: 'SFMT_TOKEN_ADDRESS', abiFile: 'PropertyToken.json' },
+      { name: 'cdpToken', addressEnv: 'CDP_TOKEN_ADDRESS', abiFile: 'PropertyToken.json' },
     ];
 
     contractConfigs.forEach(config => {
@@ -104,5 +115,43 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`Attempted to access uninitialized or unavailable contract: ${name}`);
      }
     return this.contracts[name];
+  }
+
+  // Helper to get a property token by its type or address
+  getPropertyTokenByType(propertyType: string): Contract | undefined {
+    switch (propertyType.toLowerCase()) {
+      case 'mbv':
+      case 'miami':
+        return this.contracts.mbvToken;
+      case 'mlc':
+      case 'manhattan':
+        return this.contracts.mlcToken;
+      case 'sfmt':
+      case 'san francisco':
+        return this.contracts.sfmtToken;
+      case 'cdp':
+      case 'chicago':
+        return this.contracts.cdpToken;
+      default:
+        return undefined;
+    }
+  }
+
+  // Get a token contract by its address
+  getPropertyTokenByAddress(address: string): Contract | undefined {
+    if (!address) return undefined;
+    
+    // Normalize the address for comparison
+    const normalizedAddress = address.toLowerCase();
+    
+    // Check each property token
+    for (const key of ['mbvToken', 'mlcToken', 'sfmtToken', 'cdpToken']) {
+      const contract = this.contracts[key];
+      if (contract && contract.target.toLowerCase() === normalizedAddress) {
+        return contract;
+      }
+    }
+    
+    return undefined;
   }
 } 

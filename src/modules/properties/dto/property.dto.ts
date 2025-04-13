@@ -8,6 +8,10 @@ export class PropertyDto {
   @IsNumber()
   tokenId: number;
 
+  @IsString()
+  @IsNotEmpty()
+  tokenAddress: string; // Property's specific ERC20 token address
+
   @IsObject()
   metadata: any; // Define more strictly based on actual metadata structure
 
