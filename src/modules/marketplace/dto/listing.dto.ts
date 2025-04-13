@@ -33,4 +33,8 @@ export class ListingDto {
 
   @IsBoolean()
   active: boolean;
+  
+  @IsString()
+  @IsNotEmpty()
+  currency: string; // 'USDC' instead of 'ETH'
 } 

@@ -5,4 +5,8 @@ export class ClaimableRentDto {
   @IsString()
   @IsNotEmpty()
   amount: string; // BigNumber string
+  
+  @IsString()
+  @IsNotEmpty()
+  currency: string = 'USDC'; // Default to USDC
 } 

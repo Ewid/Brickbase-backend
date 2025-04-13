@@ -10,13 +10,14 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
   private provider: WebSocketProvider | null = null;
   private providerReady = false;
   public contracts: {
-    propertyToken?: Contract;
     propertyTokenFactory?: Contract;
     propertyNFT?: Contract;
     propertyRegistry?: Contract;
     rentDistribution?: Contract;
     propertyMarketplace?: Contract;
     propertyDAO?: Contract;
+    // Add USDC token
+    usdcToken?: Contract;
     // Individual property tokens
     mbvToken?: Contract;
     mlcToken?: Contract;
@@ -72,6 +73,8 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
       { name: 'rentDistribution', addressEnv: 'RENT_DISTRIBUTION_ADDRESS', abiFile: 'RentDistribution.json' },
       { name: 'propertyMarketplace', addressEnv: 'PROPERTY_MARKETPLACE_ADDRESS', abiFile: 'PropertyMarketplace.json' },
       { name: 'propertyDAO', addressEnv: 'PROPERTY_DAO_ADDRESS', abiFile: 'PropertyDAO.json' },
+      // USDC token (using ERC20 ABI)
+      { name: 'usdcToken', addressEnv: 'USDC_TOKEN_ADDRESS', abiFile: 'ERC20.json' },
       // Individual property tokens (all use PropertyToken ABI)
       { name: 'mbvToken', addressEnv: 'MBV_TOKEN_ADDRESS', abiFile: 'PropertyToken.json' },
       { name: 'mlcToken', addressEnv: 'MLC_TOKEN_ADDRESS', abiFile: 'PropertyToken.json' },

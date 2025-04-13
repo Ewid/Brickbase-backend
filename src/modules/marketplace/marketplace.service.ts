@@ -47,9 +47,10 @@ export class MarketplaceService implements OnModuleInit {
       nftAddress: nftAddress, // Populate with found address
       tokenId: tokenId,    // Populate with found ID
       tokenAddress: tokenAddress,
-      pricePerToken: listingData[3].toString(),
+      pricePerToken: listingData[3].toString(), // Price in USDC with 6 decimal places
       amount: listingData[2].toString(),
       active: listingData[4],
+      currency: 'USDC' // New property indicating USDC currency
     };
   }
 
@@ -157,9 +158,10 @@ export class MarketplaceService implements OnModuleInit {
                 // if the listing was somehow transferred, although unlikely with current contract.
                 // Using event seller for consistency:
                 sellerAddress: seller, 
-                price: parseFloat(ethers.formatUnits(totalPrice, 18)), // Assuming price is in ETH/native token
-                // Currency might need to be determined differently if using USDC etc.
-                currency: 'ETH', // Adjust if necessary 
+                // Format with 6 decimals for USDC instead of 18 for ETH
+                price: parseFloat(ethers.formatUnits(totalPrice, 6)),
+                // Update currency to USDC
+                currency: 'USDC',
                 transactionHash: event.transactionHash,
                 timestamp: new Date(block.timestamp * 1000),
             });
