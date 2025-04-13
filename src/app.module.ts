@@ -9,6 +9,7 @@ import { DaoModule } from './modules/dao/dao.module';
 import { InstallmentsModule } from './modules/installments/installments.module';
 import { BlockchainModule } from './modules/blockchain/blockchain.module';
 import { DatabaseModule } from './modules/database/database.module';
+import { CacheModule } from './modules/cache/cache.module';
 import { join } from 'path';
 
 @Module({
@@ -27,6 +28,7 @@ import { join } from 'path';
       }),
       inject: [ConfigService],
     }),
+    CacheModule,
     AuthModule,
     PropertiesModule,
     MarketplaceModule,
