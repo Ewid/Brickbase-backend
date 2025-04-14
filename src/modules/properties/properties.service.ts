@@ -61,11 +61,6 @@ export class PropertiesService implements OnModuleInit {
     this.listenToPropertyEvents();
     this.setupCacheCleanup();
     
-    // Reset and rebuild cache on startup
-    setTimeout(() => {
-      this.resetAndRebuildCache();
-    }, 5000); // Delay 5 seconds to ensure contracts are loaded
-    
     this.logger.log('PropertiesService initialized with blockchain event listeners');
   }
   
@@ -330,10 +325,11 @@ export class PropertiesService implements OnModuleInit {
       cachedProperty.tokenAddress = propertyDto.tokenAddress;
       cachedProperty.metadata = propertyDto.metadata;
       cachedProperty.totalSupply = propertyDto.totalSupply;
+      cachedProperty.isActive = true; // Explicitly set isActive to true
       cachedProperty.expiresAt = new Date(Date.now() + 3600000); // 1 hour TTL
       
       await this.cachedPropertyRepository.save(cachedProperty);
-      this.logger.debug(`Cached property data for NFT ${propertyDto.id}, Token ID ${propertyDto.tokenId}`);
+      this.logger.log(`Cached property data for NFT ${propertyDto.id}, Token ID ${propertyDto.tokenId}, isActive: true`);
     } catch (error) {
       this.logger.error(`Error caching property data: ${error.message}`);
     }
@@ -346,6 +342,7 @@ export class PropertiesService implements OnModuleInit {
     try {
       // Check Redis cache first
       const redisCache = await this.cacheService.getAllProperties();
+      this.logger.log(`Cache read attempt: found ${redisCache?.length || 0} properties`);
       if (redisCache && redisCache.length > 1) {
         this.logger.log(`Returning ${redisCache.length} properties from Redis cache.`);
         return redisCache;
@@ -359,7 +356,7 @@ export class PropertiesService implements OnModuleInit {
         },
       });
       
-      if (cachedProperties.length > 1) {
+      if (cachedProperties.length > 0) {
         this.logger.log(`Returning ${cachedProperties.length} properties from database cache.`);
         const properties = cachedProperties.map(cp => ({
           id: cp.id,
@@ -412,6 +409,8 @@ export class PropertiesService implements OnModuleInit {
       for (let i = 0; i < allRegisteredProps.length; i++) {
         const propStruct = allRegisteredProps[i];
         
+        this.logger.log(`Property at index ${i}: NFT=${propStruct.propertyNFT}, Token=${propStruct.propertyToken}, isActive=${propStruct.isActive}`);
+        
         if (!propStruct.isActive) {
           this.logger.log(`Skipping inactive property registration at index ${i}`);
           continue;
@@ -424,6 +423,9 @@ export class PropertiesService implements OnModuleInit {
           const formattedProperty = await this.formatProperty(propStruct, i);
           if (formattedProperty) {
             allProperties.push(formattedProperty);
+            this.logger.log(`Added property to results: NFT=${formattedProperty.id}, tokenId=${formattedProperty.tokenId}`);
+          } else {
+            this.logger.warn(`Property at index ${i} could not be formatted, skipping`);
           }
         } catch (error) {
           this.logger.error(`Error processing property at index ${i}: ${error.message}`);

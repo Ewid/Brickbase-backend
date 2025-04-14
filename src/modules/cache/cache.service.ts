@@ -75,10 +75,13 @@ export class CacheService {
   }
   
   async getAllProperties(): Promise<any[]> {
-    return this.get<any[]>(this.CACHE_KEYS.PROPERTIES_ALL) || [];
+    const result = await this.get<any[]>(this.CACHE_KEYS.PROPERTIES_ALL) || [];
+    this.logger.log(`Retrieved properties from cache: found ${result.length} properties`);
+    return result;
   }
   
   async setAllProperties(properties: any[], ttl: number = 3600): Promise<void> {
+    this.logger.log(`Setting all properties in cache: ${properties.length} properties with TTL ${ttl}s`);
     await this.set(this.CACHE_KEYS.PROPERTIES_ALL, properties, ttl);
   }
   

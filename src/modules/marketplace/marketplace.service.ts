@@ -26,11 +26,6 @@ export class MarketplaceService implements OnModuleInit {
   onModuleInit() {
     this.listenToListingPurchased();
     this.setupCacheCleanup();
-    
-    // Reset and rebuild cache on startup
-    setTimeout(() => {
-      this.resetAndRebuildCache();
-    }, 8000); // Delay 8 seconds to ensure contracts are loaded and after properties
   }
 
   private async formatListingData(listingData: any, listingId: number): Promise<ListingDto> {
