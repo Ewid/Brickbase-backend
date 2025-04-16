@@ -132,9 +132,8 @@ export class PropertiesService implements OnModuleInit {
         } else {
            // If not in DB cache, still invalidate Redis 'all' cache
            await this.cacheService.delete(this.cacheService['CACHE_KEYS'].PROPERTIES_ALL);
+           this.logger.warn(`PropertyStatusChanged for ${propertyNftAddress}, but property not found in DB cache. Invalidating ALL_PROPERTIES only.`);
         }
-        
-        this.logger.log(`Invalidated caches for property ${propertyNftAddress} due to status change`);
       } catch (error) {
         this.logger.error(`Error handling PropertyStatusChanged event: ${error.message}`);
       }
@@ -169,11 +168,11 @@ export class PropertiesService implements OnModuleInit {
             cachedProperty.tokenAddress, 
             tokenIdNum
           );
-          this.logger.log(`Invalidated caches for property with tokenId ${tokenIdNum} due to metadata update`);
+           this.logger.log(`Invalidated caches for property with tokenId ${tokenIdNum} due to metadata update`);
         } else {
             // If not in DB cache, still invalidate Redis 'all' cache
            await this.cacheService.delete(this.cacheService['CACHE_KEYS'].PROPERTIES_ALL);
-           this.logger.warn(`MetadataUpdate for tokenId ${tokenIdNum}, but property not found in DB cache for full invalidation.`);
+           this.logger.warn(`MetadataUpdate for tokenId ${tokenIdNum}, but property not found in DB cache for full invalidation. Invalidating ALL_PROPERTIES only.`);
         }
       } catch (error) {
         this.logger.error(`Error handling MetadataUpdate event: ${error.message}`);
@@ -202,7 +201,7 @@ export class PropertiesService implements OnModuleInit {
         } else {
             // If not in DB cache, still invalidate Redis 'all' cache
            await this.cacheService.delete(this.cacheService['CACHE_KEYS'].PROPERTIES_ALL);
-           this.logger.warn(`NFT Transfer for tokenId ${tokenIdNum}, but property not found in DB cache for full invalidation.`);
+           this.logger.warn(`NFT Transfer for tokenId ${tokenIdNum}, but property not found in DB cache for full invalidation. Invalidating ALL_PROPERTIES only.`);
         }
       } catch (error) {
         this.logger.error(`Error handling NFT Transfer event: ${error.message}`);
@@ -258,7 +257,7 @@ export class PropertiesService implements OnModuleInit {
             } else {
                  // If not in DB cache, still invalidate Redis 'all' cache
                 await this.cacheService.delete(this.cacheService['CACHE_KEYS'].PROPERTIES_ALL);
-                this.logger.warn(`Token supply change for ${tokenAddress}, but property not found in DB cache for full invalidation.`);
+                this.logger.warn(`Token supply change for ${tokenAddress}, but property not found in DB cache for full invalidation. Invalidating ALL_PROPERTIES only.`);
             }
           }
         } catch (error) {
@@ -509,6 +508,7 @@ export class PropertiesService implements OnModuleInit {
         this.logger.warn(`Property NFT ${nftAddress} at index ${resolvedTokenId} is registered but inactive.`);
         // Invalidate any potential stale cache entry
         await this.invalidatePropertyCaches(nftAddress, propertyData.propertyToken, resolvedTokenId);
+        this.logger.log(`Skipping cache invalidation for inactive property NFT ${nftAddress}.`);
         return null; // Return null for inactive properties
       }
 
@@ -753,6 +753,9 @@ export class PropertiesService implements OnModuleInit {
   
   // Modified to delete from DB cache instead of updating expiry
   async invalidatePropertyCaches(nftAddress: string, tokenAddress: string, tokenId?: number): Promise<void> {
+    this.logger.log(`CACHE INVALIDATION SKIPPED for NFT: ${nftAddress}, Token: ${tokenAddress}`);
+    return;
+    /* Original logic:
     try {
       // Delete from database cache
       const deleteResult = await this.cachedPropertyRepository.delete({ id: nftAddress });
@@ -772,6 +775,7 @@ export class PropertiesService implements OnModuleInit {
     } catch (error) {
       this.logger.error(`Error invalidating property caches for ${nftAddress}: ${error.message}`);
     }
+    */
   }
 
   // Modified to call populateInitialPropertyCache after clearing
@@ -780,24 +784,25 @@ export class PropertiesService implements OnModuleInit {
     
     try {
       // Clear all related Redis caches
-      await this.cacheService.delete(this.cacheService['CACHE_KEYS'].PROPERTIES_ALL);
+      // await this.cacheService.delete(this.cacheService['CACHE_KEYS'].PROPERTIES_ALL);
       // Ideally, clear individual property keys too (requires knowing all IDs or using pattern matching in Redis)
       // Example (if Redis supports KEYS or SCAN): await this.cacheService.deletePattern(this.cacheService['CACHE_KEYS'].PROPERTY + '*');
       // Example: await this.cacheService.deletePattern(this.cacheService['CACHE_KEYS'].PROPERTY_BY_TOKEN + '*');
       // Example: await this.cacheService.deletePattern(this.cacheService['CACHE_KEYS'].USER_PROPERTIES + '*');
       // For simplicity without pattern matching: Resetting 'all' forces reload on next individual request.
-      this.logger.warn('Redis reset cleared PROPERTIES_ALL. Individual property/user caches will repopulate on demand or expire.');
+      this.logger.warn('SKIPPING Redis cache clear during reset/rebuild.');
 
 
       // Clear database tables
-      await this.userPropertyBalanceRepository.clear(); // Clear dependent table first
-      await this.cachedPropertyRepository.clear();    // Clear main table
-      this.logger.log('Cleared property-related database cache tables.');
+      // await this.userPropertyBalanceRepository.clear(); // Clear dependent table first
+      // await this.cachedPropertyRepository.clear();    // Clear main table
+      this.logger.warn('SKIPPING database cache clear during reset/rebuild.');
       
       // Fetch fresh data and populate Redis cache
+      this.logger.log('Attempting to repopulate cache...');
       await this.populateInitialPropertyCache();
       
-      this.logger.log('Property cache reset and rebuild initiated successfully.');
+      this.logger.log('Property cache reset and rebuild initiated (invalidation/clearing skipped).');
     } catch (error) {
       this.logger.error(`Error during property cache reset and rebuild: ${error.message}`);
     }

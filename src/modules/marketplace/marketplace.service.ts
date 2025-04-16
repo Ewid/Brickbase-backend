@@ -67,6 +67,7 @@ export class MarketplaceService implements OnModuleInit {
                  this.logger.warn(`Could not get details for purchased listing ${listingIdNum} to record sale.`);
                  // Attempt to invalidate cache even if details fetch failed
                  await this.invalidateListingCache(listingIdNum);
+                 this.logger.log(`Skipping cache invalidation for purchased listing ${listingIdNum} (details not found).`);
                  return;
             }
 
@@ -86,10 +87,12 @@ export class MarketplaceService implements OnModuleInit {
             
             // Invalidate caches *after* processing
             await this.invalidateListingCache(listingIdNum);
+            this.logger.log(`Skipping cache invalidation for purchased listing ${listingIdNum}.`);
         } catch (error) {
             this.logger.error(`Error processing ListingPurchased event for listing ${listingIdNum}: ${error.message}`);
              // Attempt to invalidate cache even on error
              await this.invalidateListingCache(listingIdNum);
+             this.logger.log(`Skipping cache invalidation for purchased listing ${listingIdNum} (error).`);
         }
     });
     
@@ -99,7 +102,7 @@ export class MarketplaceService implements OnModuleInit {
       this.logger.log(`ListingCancelled event received for listingId=${listingIdNum}`);
       try {
         await this.invalidateListingCache(listingIdNum);
-        this.logger.log(`Invalidated cache for cancelled listing ${listingIdNum}`);
+        this.logger.log(`Invalidated cache for cancelled listing ${listingIdNum}.`);
       } catch (error) {
         this.logger.error(`Error processing ListingCancelled event for ${listingIdNum}: ${error.message}`);
       }
@@ -116,16 +119,18 @@ export class MarketplaceService implements OnModuleInit {
           // formatListingData (called by fetchListingDetails) handles caching individual listing
           // We just need to invalidate the 'all listings' cache
           await this.cacheService.delete(this.cacheService['CACHE_KEYS'].LISTINGS_ALL);
-          this.logger.log(`Processed new listing ${listingIdNum} and invalidated LISTINGS_ALL cache.`);
+          this.logger.log(`Processed new listing ${listingIdNum}, invalidating LISTINGS_ALL cache.`);
         } else {
            this.logger.warn(`Could not fetch details for newly created listing ${listingIdNum}. LISTINGS_ALL cache might be stale.`);
             // Still invalidate LISTINGS_ALL just in case
            await this.cacheService.delete(this.cacheService['CACHE_KEYS'].LISTINGS_ALL);
+           this.logger.log(`Invalidating LISTINGS_ALL cache (new listing details not found).`);
         }
       } catch (error) {
         this.logger.error(`Error processing ListingCreated event for ${listingIdNum}: ${error.message}`);
          // Attempt to invalidate LISTINGS_ALL on error
         await this.cacheService.delete(this.cacheService['CACHE_KEYS'].LISTINGS_ALL);
+        this.logger.log(`Invalidating LISTINGS_ALL cache (error).`);
       }
     });
   }
@@ -335,6 +340,7 @@ export class MarketplaceService implements OnModuleInit {
              this.logger.warn(`Listing at index ${listingId} not found, seller is zero address, or inactive.`);
              // Ensure cache is clean for this inactive/non-existent listing
              await this.invalidateListingCache(listingId);
+              this.logger.log(`Skipping cache invalidation for inactive/non-existent listing ${listingId}.`);
              return null;
          }
          // Format data (this includes caching)
@@ -360,6 +366,9 @@ export class MarketplaceService implements OnModuleInit {
 
   // Modified to delete from DB cache
   private async invalidateListingCache(listingId: number): Promise<void> {
+    this.logger.log(`CACHE INVALIDATION SKIPPED for listing ID: ${listingId}`);
+    return;
+    /* Original logic:
     try {
       // Delete from database cache
       const deleteResult = await this.cachedListingRepository.delete({ listingId: listingId });
@@ -372,6 +381,7 @@ export class MarketplaceService implements OnModuleInit {
     } catch (error) {
       this.logger.error(`Error invalidating cache for listing ${listingId}: ${error.message}`);
     }
+    */
   }
   
   // Remove the setupCacheCleanup method entirely
@@ -383,19 +393,20 @@ export class MarketplaceService implements OnModuleInit {
     
     try {
       // Clear Redis caches
-      await this.cacheService.delete(this.cacheService['CACHE_KEYS'].LISTINGS_ALL);
+      // await this.cacheService.delete(this.cacheService['CACHE_KEYS'].LISTINGS_ALL);
       // Ideally, clear individual listing keys too (requires knowing all IDs or pattern matching)
       // Example: await this.cacheService.deletePattern(this.cacheService['CACHE_KEYS'].LISTING + '*');
-      this.logger.warn('Redis reset cleared LISTINGS_ALL. Individual listing caches will repopulate on demand or expire.');
+      this.logger.warn('SKIPPING Redis cache clear during reset/rebuild.');
 
       // Delete all cached listings from DB
-      await this.cachedListingRepository.clear();
-      this.logger.log('Cleared listing-related database cache table.');
+      // await this.cachedListingRepository.clear();
+      this.logger.warn('SKIPPING database cache clear during reset/rebuild.');
       
       // Fetch fresh data and populate Redis
+      this.logger.log('Attempting to repopulate cache...');
       await this.populateInitialListingCache();
       
-      this.logger.log('Listings cache reset and rebuild initiated successfully.');
+      this.logger.log('Listings cache reset and rebuild initiated (invalidation/clearing skipped).');
     } catch (error) {
       this.logger.error(`Error during listings cache reset and rebuild: ${error.message}`);
     }
