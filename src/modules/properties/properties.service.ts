@@ -390,7 +390,6 @@ export class PropertiesService implements OnModuleInit {
     }
   }
   
-  // fetchAllPropertiesFromBlockchain remains largely the same, 
   // formatProperty handles caching internally now
   private async fetchAllPropertiesFromBlockchain(): Promise<PropertyDto[]> {
     const propertyRegistry = this.blockchainService.getContract('propertyRegistry');
@@ -408,18 +407,20 @@ export class PropertiesService implements OnModuleInit {
 
       const propertyPromises: Promise<PropertyDto | null>[] = [];
 
-      // For each property in the registry, start fetching its details
+      // For each property in the registry, use its index as the tokenId (matching registration logic)
       for (let i = 0; i < allRegisteredProps.length; i++) {
         const propStruct = allRegisteredProps[i];
         
         if (!propStruct.isActive) {
-          this.logger.log(`Skipping inactive property registration at index ${i}`);
+          this.logger.log(`Skipping inactive property registration at index ${i}: NFT ${propStruct.propertyNFT}`);
           continue;
         }
         
-        this.logger.log(`Queueing format for property at index ${i}: NFT ${propStruct.propertyNFT}`);
-        // The tokenId is the index in the registry
-        propertyPromises.push(this.formatProperty(propStruct, i));
+        // Reverted: Use index 'i' as the assumed tokenId based on registration script
+        const resolvedTokenId = i; 
+
+        this.logger.log(`Queueing format for property at index ${i}: NFT ${propStruct.propertyNFT}, TokenId ${resolvedTokenId}`);
+        propertyPromises.push(this.formatProperty(propStruct, resolvedTokenId));
       }
       
       // Await all formatting promises
@@ -610,7 +611,7 @@ export class PropertiesService implements OnModuleInit {
     }
   }
 
-  // Modified to use Redis cache first, then blockchain lookup
+  // Modified to use Redis cache first, then blockchain
   async getPropertyDetailsByTokenAddress(tokenAddress: string): Promise<PropertyDto | null> {
     this.logger.log(`Fetching property details by token address ${tokenAddress}`);
     
@@ -709,6 +710,8 @@ export class PropertiesService implements OnModuleInit {
   private async fetchPropertiesOwnedByUserFromBlockchain(address: string): Promise<any[]> {
     // Ensure we have the latest list of properties, potentially from cache
     const allProperties = await this.findAllProperties(); 
+    // Log the properties being checked
+    this.logger.debug(`[fetchOwned] Properties list from findAllProperties: ${JSON.stringify(allProperties.map(p => ({ id: p.id, tokenAddress: p.tokenAddress, tokenId: p.tokenId })), null, 2)}`);
     const ownedPropertiesPromises: Promise<any | null>[] = [];
     
     this.logger.log(`Checking balances for ${allProperties.length} properties for user ${address}...`);
@@ -720,6 +723,8 @@ export class PropertiesService implements OnModuleInit {
               const tokenContract = this.blockchainService.getPropertyTokenByAddress(property.tokenAddress);
               if (tokenContract) {
                 const balance = await tokenContract.balanceOf(address);
+                // Log the balance check result
+                this.logger.debug(`[fetchOwned] Balance check for ${property.tokenAddress} (User: ${address}): ${balance.toString()}`);
                 if (balance > BigInt(0)) {
                   // Save to DB cache (without TTL) using upsert
                   const userBalance = new UserPropertyBalance();

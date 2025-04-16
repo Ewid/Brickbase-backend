@@ -1,7 +1,8 @@
-import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn, Index, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn, Index, ManyToOne, JoinColumn, Unique } from 'typeorm';
 import { CachedProperty } from './cached-property.entity';
 
 @Entity('user_property_balances')
+@Unique(['userAddress', 'propertyTokenAddress'])
 export class UserPropertyBalance {
   @PrimaryGeneratedColumn('uuid')
   id: string;
