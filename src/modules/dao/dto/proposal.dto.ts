@@ -1,5 +1,5 @@
 // src/modules/dao/dto/proposal.dto.ts
-import { IsNumber, IsString, IsBoolean, IsNotEmpty, IsOptional } from 'class-validator';
+import { IsNumber, IsString, IsBoolean, IsNotEmpty, IsOptional, IsEthereumAddress } from 'class-validator';
 
 export class ProposalDto {
   // Based on PropertyDAO.Proposal struct
@@ -21,6 +21,9 @@ export class ProposalDto {
   @IsString() // Function call data (hex string)
   @IsNotEmpty()
   functionCall: string;
+
+  @IsEthereumAddress() // Added validation
+  propertyTokenAddress: string;
 
   @IsString() // votesFor as BigNumber string
   @IsNotEmpty()

@@ -4,7 +4,7 @@ import { Repository } from 'typeorm';
 import { BlockchainService } from '../blockchain/blockchain.service';
 import { PropertiesService } from '../properties/properties.service';
 import { ExpenseRecord, ExpenseStatus } from './entities/expense-record.entity';
-import { ethers, Contract, Log, EventLog, ZeroAddress } from 'ethers';
+import { Contract, Log, EventLog, ZeroAddress } from 'ethers';
 import { ProposalDto } from './dto/proposal.dto';
 
 @Injectable()
@@ -30,6 +30,7 @@ export class DaoService implements OnModuleInit {
         description: proposalData.description,
         targetContract: proposalData.targetContract,
         functionCall: proposalData.functionCall,
+        propertyTokenAddress: proposalData.propertyTokenAddress,
         votesFor: proposalData.votesFor.toString(),
         votesAgainst: proposalData.votesAgainst.toString(),
         startTime: Number(proposalData.startTime),
@@ -67,7 +68,7 @@ export class DaoService implements OnModuleInit {
 
         return proposalsWithState;
     } catch (error) {
-        this.logger.error(`Error fetching DAO proposals: ${error.message}`);
+        this.logger.error(`Error fetching DAO proposals: ${error.message}`, error.stack);
         return [];
     }
   }
@@ -83,14 +84,14 @@ export class DaoService implements OnModuleInit {
     try {
         const rawProposal = await (propertyDAO as any).proposals(proposalId);
         if (!rawProposal || rawProposal.proposer === ZeroAddress) {
-            this.logger.warn(`Proposal ${proposalId} not found.`);
+            this.logger.warn(`Proposal ${proposalId} not found or proposer is ZeroAddress.`);
             return null;
         }
         const formattedProposal = this.formatProposalData(rawProposal);
         const proposalWithState = await this.addStateToProposal(formattedProposal, propertyDAO);
         return proposalWithState;
     } catch (error) {
-        this.logger.error(`Error fetching proposal details for ${proposalId}: ${error.message}`);
+        this.logger.error(`Error fetching proposal details for ${proposalId}: ${error.message}`, error.stack);
         return null;
     }
   }
@@ -118,10 +119,10 @@ export class DaoService implements OnModuleInit {
 
     this.logger.log('Setting up listener for ProposalCreated events...');
 
-    propertyDAO.on('ProposalCreated', async (proposalId, proposer, description, event: EventLog) => {
+    propertyDAO.on('ProposalCreated', async (proposalId, proposer, propertyTokenAddress, description, event: EventLog) => {
         const proposalIdNum = Number(proposalId);
-        this.logger.log(`ProposalCreated event received: id=${proposalIdNum}, desc=${description}`);
-
+        this.logger.log(`ProposalCreated event received: id=${proposalIdNum}, proposer=${proposer}, propToken=${propertyTokenAddress}, desc=${description}`);
+        
         const isExpenseProposal = description.toLowerCase().includes('expense:');
 
         if (isExpenseProposal) {
@@ -135,20 +136,20 @@ export class DaoService implements OnModuleInit {
                 
                 let propertyNftId = 'N/A';
                 try {
-                    const daoTokenAddress = await (propertyDAO as any).propertyToken();
-                    if (daoTokenAddress && daoTokenAddress !== ZeroAddress) {
-                        const nftDetails = await this.propertiesService.findNftDetailsByTokenAddress(daoTokenAddress);
+                    if (propertyTokenAddress && propertyTokenAddress !== ZeroAddress) {
+                        this.logger.log(`Looking up NFT details for event token: ${propertyTokenAddress}`);
+                        const nftDetails = await this.propertiesService.findNftDetailsByTokenAddress(propertyTokenAddress);
                         if (nftDetails) {
                             propertyNftId = nftDetails.nftAddress; 
-                            this.logger.log(`Found associated NFT Address ${propertyNftId} for DAO token ${daoTokenAddress}`);
+                            this.logger.log(`Found associated NFT Address ${propertyNftId} for proposal token ${propertyTokenAddress}`);
                         } else {
-                            this.logger.warn(`Could not find NFT details associated with DAO token ${daoTokenAddress}`);
+                            this.logger.warn(`Could not find NFT details associated with proposal token ${propertyTokenAddress}`);
                         }
                     } else {
-                        this.logger.warn('DAO contract propertyToken address is zero or invalid.');
+                        this.logger.warn('Proposal event included zero or invalid propertyTokenAddress.');
                     }
                 } catch (lookupError) {
-                    this.logger.error(`Error looking up NFT details for DAO token: ${lookupError.message}`);
+                    this.logger.error(`Error looking up NFT details for proposal token ${propertyTokenAddress}: ${lookupError.message}`);
                 }
 
                 const parsedAmount = 100;
