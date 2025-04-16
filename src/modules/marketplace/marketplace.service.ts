@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan, MoreThan } from 'typeorm';
+import { Repository } from 'typeorm';
 import { BlockchainService } from '../blockchain/blockchain.service';
 import { PropertiesService } from '../properties/properties.service';
 import { HistoricalSale } from './entities/historical-sale.entity';
@@ -12,6 +12,8 @@ import { ListingDto } from './dto/listing.dto';
 @Injectable()
 export class MarketplaceService implements OnModuleInit {
   private readonly logger = new Logger(MarketplaceService.name);
+  private readonly ALL_LISTINGS_CACHE_TTL = 3600; // 1 hour in seconds
+  private readonly INDIVIDUAL_LISTING_CACHE_TTL = 3600; // 1 hour
 
   constructor(
     @InjectRepository(HistoricalSale)
@@ -23,12 +25,113 @@ export class MarketplaceService implements OnModuleInit {
     private cacheService: CacheService,
   ) {}
 
-  onModuleInit() {
-    this.listenToListingPurchased();
-    this.setupCacheCleanup();
+  async onModuleInit() {
+    this.listenToListingEvents(); // Renamed for clarity
+    // Remove setupCacheCleanup call
+    this.logger.log('MarketplaceService initialized, starting initial cache population...');
+    // Populate cache on startup - don't await, let it run in background
+    this.populateInitialListingCache().catch(error => {
+      this.logger.error(`Initial listing cache population failed: ${error.message}`);
+    });
+  }
+  
+  private async populateInitialListingCache(): Promise<void> {
+    this.logger.log('Starting initial fetch of all active listings for cache...');
+    const listings = await this.fetchAllListingsFromBlockchain();
+    if (listings.length > 0) {
+      await this.cacheService.setAllListings(listings, this.ALL_LISTINGS_CACHE_TTL);
+      this.logger.log(`Successfully populated Redis cache with ${listings.length} active listings.`);
+    } else {
+      this.logger.warn('No active listings found during initial cache population.');
+    }
   }
 
-  private async formatListingData(listingData: any, listingId: number): Promise<ListingDto> {
+  // Renamed for clarity, includes all listing-related events
+  private listenToListingEvents() {
+    const propertyMarketplace = this.blockchainService.getContract('propertyMarketplace');
+    if (!propertyMarketplace) {
+      this.logger.error('Cannot listen for Marketplace events: PropertyMarketplace contract not available');
+      return;
+    }
+
+    this.logger.log('Setting up listeners for Marketplace events (ListingPurchased, ListingCancelled, ListingCreated)...');
+
+    // --- ListingPurchased Listener ---
+    propertyMarketplace.on('ListingPurchased', async (listingId, buyer, seller, amount, totalPrice, event: EventLog) => {
+        this.logger.log(`ListingPurchased event received: listingId=${listingId}, buyer=${buyer}, amount=${amount}`);
+        const listingIdNum = Number(listingId);
+        try {
+            // Fetch details *before* invalidating
+            const listingDetails = await this.getListingDetails(listingIdNum);
+            if (!listingDetails) {
+                 this.logger.warn(`Could not get details for purchased listing ${listingIdNum} to record sale.`);
+                 // Attempt to invalidate cache even if details fetch failed
+                 await this.invalidateListingCache(listingIdNum);
+                 return;
+            }
+
+            // Record the historical sale
+            const block = await event.getBlock();
+            const sale = this.historicalSaleRepository.create({
+                propertyNftId: listingDetails.nftAddress, 
+                buyerAddress: buyer,
+                sellerAddress: seller, 
+                price: parseFloat(ethers.formatUnits(totalPrice, 6)), // Assuming 6 decimals for USDC
+                currency: 'USDC',
+                transactionHash: event.transactionHash,
+                timestamp: new Date(block.timestamp * 1000),
+            });
+            await this.historicalSaleRepository.save(sale);
+            this.logger.log(`Saved historical sale for listing ${listingIdNum} (NFT: ${listingDetails.nftAddress}), tx: ${event.transactionHash}`);
+            
+            // Invalidate caches *after* processing
+            await this.invalidateListingCache(listingIdNum);
+        } catch (error) {
+            this.logger.error(`Error processing ListingPurchased event for listing ${listingIdNum}: ${error.message}`);
+             // Attempt to invalidate cache even on error
+             await this.invalidateListingCache(listingIdNum);
+        }
+    });
+    
+    // --- ListingCancelled Listener ---
+    propertyMarketplace.on('ListingCancelled', async (listingId, event: EventLog) => {
+      const listingIdNum = Number(listingId);
+      this.logger.log(`ListingCancelled event received for listingId=${listingIdNum}`);
+      try {
+        await this.invalidateListingCache(listingIdNum);
+        this.logger.log(`Invalidated cache for cancelled listing ${listingIdNum}`);
+      } catch (error) {
+        this.logger.error(`Error processing ListingCancelled event for ${listingIdNum}: ${error.message}`);
+      }
+    });
+    
+    // --- ListingCreated Listener ---
+    propertyMarketplace.on('ListingCreated', async (listingId, seller, propertyToken, tokenAmount, pricePerToken, event: EventLog) => {
+      const listingIdNum = Number(listingId);
+      this.logger.log(`ListingCreated event received: listingId=${listingIdNum}, seller=${seller}`);
+      try {
+        // Fetch new listing details directly from blockchain
+        const listing = await this.fetchListingDetailsFromBlockchain(listingIdNum);
+        if (listing) {
+          // formatListingData (called by fetchListingDetails) handles caching individual listing
+          // We just need to invalidate the 'all listings' cache
+          await this.cacheService.delete(this.cacheService['CACHE_KEYS'].LISTINGS_ALL);
+          this.logger.log(`Processed new listing ${listingIdNum} and invalidated LISTINGS_ALL cache.`);
+        } else {
+           this.logger.warn(`Could not fetch details for newly created listing ${listingIdNum}. LISTINGS_ALL cache might be stale.`);
+            // Still invalidate LISTINGS_ALL just in case
+           await this.cacheService.delete(this.cacheService['CACHE_KEYS'].LISTINGS_ALL);
+        }
+      } catch (error) {
+        this.logger.error(`Error processing ListingCreated event for ${listingIdNum}: ${error.message}`);
+         // Attempt to invalidate LISTINGS_ALL on error
+        await this.cacheService.delete(this.cacheService['CACHE_KEYS'].LISTINGS_ALL);
+      }
+    });
+  }
+
+  // Modified to save to cache with TTL and without DB expiresAt
+  private async formatListingData(listingData: any, listingId: number): Promise<ListingDto | null> {
     // Indices based on PropertyMarketplace.listings return:
     // 0: seller (address)
     // 1: propertyToken (address) - This is the ERC20 token for the property shares
@@ -37,54 +140,66 @@ export class MarketplaceService implements OnModuleInit {
     // 4: isActive (bool)
     const tokenAddress = listingData[1]; // PropertyToken address
 
+    if (tokenAddress === ZeroAddress) {
+        this.logger.warn(`Listing ${listingId} has zero address for propertyToken.`);
+        return null; // Invalid listing data
+    }
+
     let nftAddress = '';
     let tokenId = '';
 
-    // Fetch NFT details using the PropertiesService
-    const nftDetails = await this.propertiesService.findNftDetailsByTokenAddress(tokenAddress);
-    if (nftDetails) {
-      nftAddress = nftDetails.nftAddress;
-      tokenId = nftDetails.tokenId.toString();
-    }
-
-    const formattedListing = {
-      listingId: listingId, // Pass the index as the ID
-      seller: listingData[0],
-      nftAddress: nftAddress, // Populate with found address
-      tokenId: tokenId,    // Populate with found ID
-      tokenAddress: tokenAddress,
-      pricePerToken: listingData[3].toString(), // Price in USDC with 6 decimal places
-      amount: listingData[2].toString(),
-      active: listingData[4],
-      currency: 'USDC' // New property indicating USDC currency
-    };
-
-    // Cache the listing in database
     try {
-      const cachedListing = new CachedListing();
-      cachedListing.listingId = formattedListing.listingId;
-      cachedListing.seller = formattedListing.seller;
-      cachedListing.nftAddress = formattedListing.nftAddress;
-      cachedListing.tokenId = formattedListing.tokenId;
-      cachedListing.tokenAddress = formattedListing.tokenAddress;
-      cachedListing.pricePerToken = formattedListing.pricePerToken;
-      cachedListing.amount = formattedListing.amount;
-      cachedListing.active = formattedListing.active;
-      cachedListing.currency = formattedListing.currency;
-      cachedListing.expiresAt = new Date(Date.now() + 300000); // 5 minutes TTL
-      
-      await this.cachedListingRepository.save(cachedListing);
-      this.logger.debug(`Cached listing data for ID ${listingId} in database`);
-      
-      // Cache in Redis
-      await this.cacheService.setListing(listingId, formattedListing);
-    } catch (error) {
-      this.logger.error(`Error caching listing data: ${error.message}`);
-    }
+        // Fetch NFT details using the PropertiesService (relies on its own caching)
+        const nftDetails = await this.propertiesService.findNftDetailsByTokenAddress(tokenAddress);
+        if (nftDetails) {
+          nftAddress = nftDetails.nftAddress;
+          tokenId = nftDetails.tokenId.toString();
+        } else {
+          this.logger.warn(`Could not find NFT details for token address ${tokenAddress} associated with listing ${listingId}`);
+          // Proceeding without NFT details, might indicate an issue upstream or delay in property caching
+        }
 
-    return formattedListing;
+        const formattedListing: ListingDto = {
+          listingId: listingId,
+          seller: listingData[0],
+          nftAddress: nftAddress, // Might be empty if lookup failed
+          tokenId: tokenId,       // Might be empty if lookup failed
+          tokenAddress: tokenAddress,
+          pricePerToken: listingData[3].toString(),
+          amount: listingData[2].toString(),
+          active: listingData[4],
+          currency: 'USDC'
+        };
+
+        // Save to database cache (without TTL, using upsert)
+        const cachedListing = new CachedListing();
+        cachedListing.listingId = formattedListing.listingId;
+        cachedListing.seller = formattedListing.seller;
+        cachedListing.nftAddress = formattedListing.nftAddress;
+        cachedListing.tokenId = formattedListing.tokenId;
+        cachedListing.tokenAddress = formattedListing.tokenAddress;
+        cachedListing.pricePerToken = formattedListing.pricePerToken;
+        cachedListing.amount = formattedListing.amount;
+        cachedListing.active = formattedListing.active;
+        cachedListing.currency = formattedListing.currency;
+        // No expiresAt
+        
+        await this.cachedListingRepository.upsert(cachedListing, ['listingId']);
+        this.logger.debug(`Saved/Updated listing data for ID ${listingId} in database cache.`);
+        
+        // Cache in Redis with TTL
+        await this.cacheService.setListing(listingId, formattedListing, this.INDIVIDUAL_LISTING_CACHE_TTL);
+
+        return formattedListing;
+        
+    } catch (error) {
+      // Catch errors during formatting or caching
+      this.logger.error(`Error formatting or caching listing data for ID ${listingId}: ${error.message}`);
+      return null; // Return null if formatting/caching fails
+    }
   }
 
+  // Modified to prioritize Redis cache
   async findAllListings(): Promise<ListingDto[]> {
     this.logger.log('Fetching all active listings...');
     
@@ -96,50 +211,30 @@ export class MarketplaceService implements OnModuleInit {
         return redisCache;
       }
       
-      // Check database cache
-      const cachedListings = await this.cachedListingRepository.find({
-        where: {
-          active: true,
-          expiresAt: MoreThan(new Date()),
-        },
-      });
-      
-      if (cachedListings.length > 0) {
-        this.logger.log(`Returning ${cachedListings.length} active listings from database cache.`);
-        const listings = cachedListings.map(cl => ({
-          listingId: cl.listingId,
-          seller: cl.seller,
-          nftAddress: cl.nftAddress,
-          tokenId: cl.tokenId,
-          tokenAddress: cl.tokenAddress,
-          pricePerToken: cl.pricePerToken,
-          amount: cl.amount,
-          active: cl.active,
-          currency: cl.currency,
-        }));
-        
-        // Update Redis cache
-        await this.cacheService.setAllListings(listings);
-        
-        return listings;
-      }
-      
-      // Cache miss, fetch from blockchain
-      this.logger.log('Cache miss for active listings, fetching from blockchain...');
+      // Redis cache miss, fetch from blockchain
+      this.logger.log('Redis cache miss for all listings, fetching from blockchain...');
       const listings = await this.fetchAllListingsFromBlockchain();
       
       // Update Redis cache
       if (listings.length > 0) {
-        await this.cacheService.setAllListings(listings);
+        await this.cacheService.setAllListings(listings, this.ALL_LISTINGS_CACHE_TTL);
       }
       
       return listings;
     } catch (error) {
-      this.logger.error(`Error checking cache for listings: ${error.message}`);
-      return this.fetchAllListingsFromBlockchain();
+      this.logger.error(`Error finding all listings: ${error.message}`);
+      // Attempt fallback to blockchain directly
+      try {
+        return await this.fetchAllListingsFromBlockchain();
+      } catch (fallbackError) {
+        this.logger.error(`Fallback fetchAllListingsFromBlockchain failed: ${fallbackError.message}`);
+        return [];
+      }
     }
   }
   
+  // fetchAllListingsFromBlockchain remains largely the same,
+  // formatListingData handles caching internally now
   private async fetchAllListingsFromBlockchain(): Promise<ListingDto[]> {
     const propertyMarketplace = this.blockchainService.getContract('propertyMarketplace');
 
@@ -156,8 +251,14 @@ export class MarketplaceService implements OnModuleInit {
         const listingPromises = activeListingIndices.map(async (indexBigInt) => {
             const index = Number(indexBigInt);
             try {
+                // Fetch raw data first
                 const rawListing = await (propertyMarketplace as any).listings(index);
-                // Await the async formatting
+                 // Basic validation before formatting
+                 if (!rawListing || rawListing[0] === ZeroAddress || !rawListing[4]) { // Check seller and isActive flag
+                     this.logger.debug(`Skipping listing index ${index}: Seller is zero or listing is inactive.`);
+                     return null;
+                 }
+                // Format data (this includes caching)
                 return await this.formatListingData(rawListing, index);
             } catch (error) {
                 this.logger.error(`Error fetching or formatting listing index ${index}: ${error.message}`);
@@ -165,11 +266,11 @@ export class MarketplaceService implements OnModuleInit {
             }
         });
 
-        // Resolve all promises and filter out nulls (failed fetches/formats)
+        // Resolve all promises and filter out nulls (failed/inactive fetches/formats)
         const resolvedListings = await Promise.all(listingPromises);
         const activeListings = resolvedListings.filter(listing => listing !== null) as ListingDto[];
 
-        this.logger.log(`Successfully formatted ${activeListings.length} active listings.`);
+        this.logger.log(`Successfully formatted ${activeListings.length} active listings from blockchain.`);
         return activeListings;
 
     } catch (error) {
@@ -178,6 +279,7 @@ export class MarketplaceService implements OnModuleInit {
     }
   }
 
+  // Modified to prioritize Redis, then blockchain
   async getListingDetails(listingId: number): Promise<ListingDto | null> {
      this.logger.log(`Fetching details for listing index ${listingId}...`);
      
@@ -185,51 +287,39 @@ export class MarketplaceService implements OnModuleInit {
        // Check Redis cache first
        const redisCache = await this.cacheService.getListing(listingId);
        if (redisCache) {
-         this.logger.log(`Redis cache hit for listing ID ${listingId}`);
-         return redisCache;
+         // Verify if the cached listing is still active according to its own flag
+         if (redisCache.active) {
+            this.logger.log(`Redis cache hit for listing ID ${listingId}.`);
+            return redisCache;
+         } else {
+             this.logger.log(`Redis cache hit for listing ID ${listingId}, but it's marked inactive. Returning null.`);
+              // Optionally invalidate here if inactive shouldn't be cached long
+             // await this.invalidateListingCache(listingId);
+             return null;
+         }
        }
        
-       // Check database cache
-       const cachedListing = await this.cachedListingRepository.findOne({
-         where: { listingId, active: true, expiresAt: MoreThan(new Date()) },
-       });
-       
-       if (cachedListing) {
-         this.logger.log(`Database cache hit for listing ID ${listingId}`);
-         const listing = {
-           listingId: cachedListing.listingId,
-           seller: cachedListing.seller,
-           nftAddress: cachedListing.nftAddress,
-           tokenId: cachedListing.tokenId,
-           tokenAddress: cachedListing.tokenAddress,
-           pricePerToken: cachedListing.pricePerToken,
-           amount: cachedListing.amount,
-           active: cachedListing.active,
-           currency: cachedListing.currency,
-         };
-         
-         // Update Redis cache
-         await this.cacheService.setListing(listingId, listing);
-         
-         return listing;
-       }
-       
-       // Cache miss, fetch from blockchain
-       this.logger.log(`Cache miss for listing ID ${listingId}, fetching from blockchain...`);
+       // Redis cache miss, fetch from blockchain
+       this.logger.log(`Redis cache miss for listing ID ${listingId}, fetching from blockchain...`);
        const listing = await this.fetchListingDetailsFromBlockchain(listingId);
        
-       // Update Redis cache if listing was found
-       if (listing) {
-         await this.cacheService.setListing(listingId, listing);
-       }
+       // formatListingData called within fetchListingDetailsFromBlockchain handles caching
        
-       return listing;
+       return listing; // Return the fetched (and maybe cached) listing or null
      } catch (error) {
-        this.logger.error(`Error checking cache for listing ${listingId}: ${error.message}`);
-        return this.fetchListingDetailsFromBlockchain(listingId);
+        this.logger.error(`Error getting listing details for ${listingId}: ${error.message}`);
+        // Attempt fallback to blockchain directly
+        try {
+            return await this.fetchListingDetailsFromBlockchain(listingId);
+        } catch (fallbackError) {
+            this.logger.error(`Fallback fetchListingDetailsFromBlockchain failed for ${listingId}: ${fallbackError.message}`);
+            return null;
+        }
      }
   }
   
+  // fetchListingDetailsFromBlockchain remains largely the same,
+  // formatListingData handles caching internally now
   private async fetchListingDetailsFromBlockchain(listingId: number): Promise<ListingDto | null> {
      const propertyMarketplace = this.blockchainService.getContract('propertyMarketplace');
 
@@ -240,11 +330,14 @@ export class MarketplaceService implements OnModuleInit {
     try {
          const rawListing = await (propertyMarketplace as any).listings(listingId);
 
-         if (!rawListing || rawListing[0] === ZeroAddress) { // Check seller (index 0) 
-             this.logger.warn(`Listing at index ${listingId} not found (or seller is zero address).`);
+         // Check seller and isActive flag directly from contract data
+         if (!rawListing || rawListing[0] === ZeroAddress || !rawListing[4]) { 
+             this.logger.warn(`Listing at index ${listingId} not found, seller is zero address, or inactive.`);
+             // Ensure cache is clean for this inactive/non-existent listing
+             await this.invalidateListingCache(listingId);
              return null;
          }
-         // Await the async formatting
+         // Format data (this includes caching)
          return await this.formatListingData(rawListing, listingId);
      } catch (error) {
          this.logger.error(`Error fetching listing details for index ${listingId}: ${error.message}`);
@@ -265,138 +358,46 @@ export class MarketplaceService implements OnModuleInit {
     }
   }
 
-  private listenToListingPurchased() {
-    const propertyMarketplace = this.blockchainService.getContract('propertyMarketplace');
-    if (!propertyMarketplace) {
-      this.logger.error('Cannot listen for ListingPurchased: PropertyMarketplace contract not available');
-      return;
-    }
-
-    this.logger.log('Setting up listener for ListingPurchased events...');
-
-    propertyMarketplace.on('ListingPurchased', async (listingId, buyer, seller, amount, totalPrice, event: EventLog) => {
-        this.logger.log(`ListingPurchased event received: listingId=${listingId}, buyer=${buyer}, amount=${amount}`);
-        try {
-            // Fetch details using the listingId from the event
-            const listingDetails = await this.getListingDetails(Number(listingId)); 
-            if (!listingDetails) {
-                 this.logger.warn(`Could not get details for purchased listing ${listingId} to record sale.`);
-                 return;
-            }
-
-            const block = await event.getBlock();
-
-            const sale = this.historicalSaleRepository.create({
-                // Use nftAddress from the fetched listing details
-                propertyNftId: listingDetails.nftAddress, 
-                buyerAddress: buyer,
-                // The seller argument from the event might be more reliable than listingDetails.seller
-                // if the listing was somehow transferred, although unlikely with current contract.
-                // Using event seller for consistency:
-                sellerAddress: seller, 
-                // Format with 6 decimals for USDC instead of 18 for ETH
-                price: parseFloat(ethers.formatUnits(totalPrice, 6)),
-                // Update currency to USDC
-                currency: 'USDC',
-                transactionHash: event.transactionHash,
-                timestamp: new Date(block.timestamp * 1000),
-            });
-            await this.historicalSaleRepository.save(sale);
-            this.logger.log(`Saved historical sale for listing ${listingId} (NFT: ${listingDetails.nftAddress}), tx: ${event.transactionHash}`);
-            
-            // Update or invalidate caches
-            await this.invalidateListingCache(Number(listingId));
-        } catch (error) {
-            this.logger.error(`Error processing ListingPurchased event for listing ${listingId}: ${error.message}`);
-        }
-    });
-    
-    // Listen for ListingCancelled events to update cache
-    propertyMarketplace.on('ListingCancelled', async (listingId, event: EventLog) => {
-      this.logger.log(`ListingCancelled event received for listingId=${listingId}`);
-      try {
-        await this.invalidateListingCache(Number(listingId));
-        this.logger.log(`Invalidated cache for cancelled listing ${listingId}`);
-      } catch (error) {
-        this.logger.error(`Error processing ListingCancelled event: ${error.message}`);
-      }
-    });
-    
-    // Listen for ListingCreated events to update cache
-    propertyMarketplace.on('ListingCreated', async (listingId, seller, propertyToken, tokenAmount, pricePerToken, event: EventLog) => {
-      this.logger.log(`ListingCreated event received: listingId=${listingId}, seller=${seller}`);
-      try {
-        // Fetch and cache new listing details
-        const listing = await this.fetchListingDetailsFromBlockchain(Number(listingId));
-        if (listing) {
-          await this.cacheService.setListing(Number(listingId), listing);
-          
-          // Invalidate all listings cache to include this new listing
-          await this.cacheService.delete(this.cacheService['CACHE_KEYS'].LISTINGS_ALL);
-        }
-        this.logger.log(`Processed new listing ${listingId}`);
-      } catch (error) {
-        this.logger.error(`Error processing ListingCreated event: ${error.message}`);
-      }
-    });
-  }
-  
-  // Invalidate both database and Redis cache for a listing
+  // Modified to delete from DB cache
   private async invalidateListingCache(listingId: number): Promise<void> {
     try {
       // Delete from database cache
-      await this.cachedListingRepository.delete({ listingId: listingId });
+      const deleteResult = await this.cachedListingRepository.delete({ listingId: listingId });
+      this.logger.log(`Deleted ${deleteResult.affected || 0} entries from DB cache for listing ${listingId}.`);
       
-      // Delete from Redis cache
+      // Delete from Redis cache (specific and all)
       await this.cacheService.invalidateListingCache(listingId);
       
-      this.logger.log(`Invalidated cache for listing ${listingId}`);
+      this.logger.log(`Invalidated Redis caches for listing ${listingId}`);
     } catch (error) {
       this.logger.error(`Error invalidating cache for listing ${listingId}: ${error.message}`);
     }
   }
   
-  // Setup periodic cache cleanup
-  private setupCacheCleanup() {
-    const cleanupInterval = 1800000; // 30 minutes
-    
-    setInterval(async () => {
-      this.logger.log('Running listings cache cleanup...');
-      
-      try {
-        // Delete expired listing cache entries
-        const expiredListingsResult = await this.cachedListingRepository.delete({
-          expiresAt: LessThan(new Date()),
-        });
-        
-        this.logger.log(`Cleaned up ${expiredListingsResult.affected || 0} expired listing entries.`);
-      } catch (error) {
-        this.logger.error(`Error during listings cache cleanup: ${error.message}`);
-      }
-    }, cleanupInterval);
-  }
+  // Remove the setupCacheCleanup method entirely
+  // private setupCacheCleanup() { ... }
 
+  // Modified to call populateInitialListingCache after clearing
   async resetAndRebuildCache(): Promise<void> {
     this.logger.log('Resetting and rebuilding listings cache...');
     
     try {
       // Clear Redis caches
       await this.cacheService.delete(this.cacheService['CACHE_KEYS'].LISTINGS_ALL);
-      
-      // Delete all cached listings
+      // Ideally, clear individual listing keys too (requires knowing all IDs or pattern matching)
+      // Example: await this.cacheService.deletePattern(this.cacheService['CACHE_KEYS'].LISTING + '*');
+      this.logger.warn('Redis reset cleared LISTINGS_ALL. Individual listing caches will repopulate on demand or expire.');
+
+      // Delete all cached listings from DB
       await this.cachedListingRepository.clear();
+      this.logger.log('Cleared listing-related database cache table.');
       
-      // Fetch fresh data from blockchain
-      const listings = await this.fetchAllListingsFromBlockchain();
+      // Fetch fresh data and populate Redis
+      await this.populateInitialListingCache();
       
-      this.logger.log(`Fetched ${listings.length} listings from blockchain for cache rebuild`);
-      
-      // Update Redis cache
-      await this.cacheService.setAllListings(listings);
-      
-      this.logger.log('Listings cache rebuild completed successfully');
+      this.logger.log('Listings cache reset and rebuild initiated successfully.');
     } catch (error) {
-      this.logger.error(`Error during listings cache rebuild: ${error.message}`);
+      this.logger.error(`Error during listings cache reset and rebuild: ${error.message}`);
     }
   }
 } 

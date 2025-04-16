@@ -36,7 +36,4 @@ export class CachedListing {
 
   @UpdateDateColumn()
   updatedAt: Date;
-
-  @Column({ type: 'timestamp', default: () => "CURRENT_TIMESTAMP + interval '5 minutes'" })
-  expiresAt: Date;
 } 
