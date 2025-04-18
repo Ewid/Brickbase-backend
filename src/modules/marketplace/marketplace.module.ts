@@ -6,10 +6,11 @@ import { HistoricalSale } from './entities/historical-sale.entity';
 import { CachedListing } from './entities/cached-listing.entity';
 import { PropertiesModule } from '../properties/properties.module';
 import { CacheModule } from '../cache/cache.module';
+import { UserPropertyBalance } from '../properties/entities/user-property-balance.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([HistoricalSale, CachedListing]),
+    TypeOrmModule.forFeature([HistoricalSale, CachedListing, UserPropertyBalance]),
     PropertiesModule,
     CacheModule,
   ],

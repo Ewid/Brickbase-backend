@@ -25,7 +25,10 @@ export class UserPropertyBalance {
   balance: string;
 
   @ManyToOne(() => CachedProperty)
-  @JoinColumn({ name: 'propertyNftAddress', referencedColumnName: 'id' })
+  @JoinColumn([
+    { name: 'propertyNftAddress', referencedColumnName: 'id' },
+    { name: 'tokenId', referencedColumnName: 'tokenId' }
+  ])
   cachedProperty: CachedProperty;
 
   @CreateDateColumn()

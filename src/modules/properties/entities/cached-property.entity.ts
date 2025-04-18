@@ -1,12 +1,12 @@
-import { Entity, Column, PrimaryColumn, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
+import { Entity, Column, PrimaryColumn, CreateDateColumn, UpdateDateColumn, Index, Unique } from 'typeorm';
 
 @Entity('cached_properties')
+@Unique(['id', 'tokenId'])
 export class CachedProperty {
   @PrimaryColumn()
   id: string; // NFT address
 
-  @Column()
-  @Index()
+  @PrimaryColumn()
   tokenId: number;
 
   @Column()

@@ -225,43 +225,27 @@ export class PropertiesService implements OnModuleInit {
         this.logger.log(`Token Transfer event on ${tokenAddress}: from=${from}, to=${to}, amount=${amount}`);
         
         try {
-          // For non-zero addresses, invalidate the user's balance cache (Redis and DB)
-          if (from !== ZeroAddress) {
-            await this.cacheService.delete(`${this.cacheService['CACHE_KEYS'].USER_PROPERTIES}${from}`);
-            await this.userPropertyBalanceRepository.delete({ userAddress: from, propertyTokenAddress: tokenAddress });
-            this.logger.log(`Invalidated property balance cache for user ${from} and token ${tokenAddress}`);
-          }
-          
+          // Keep the 'to' address handling block (for the buyer/recipient)
           if (to !== ZeroAddress) {
             await this.cacheService.delete(`${this.cacheService['CACHE_KEYS'].USER_PROPERTIES}${to}`);
-            await this.userPropertyBalanceRepository.delete({ userAddress: to, propertyTokenAddress: tokenAddress });
-            this.logger.log(`Invalidated property balance cache for user ${to} and token ${tokenAddress}`);
-          }
-          
-          // If tokens were minted or burned, total supply might have changed.
-          // Invalidate the specific property cache and the 'all properties' cache.
-          if (from === ZeroAddress || to === ZeroAddress) {
-            // Find property details needed for invalidation
-            const property = await this.cachedPropertyRepository.findOne({
-              where: { tokenAddress },
-              select: ['id', 'tokenId'] // Select only needed fields
-            });
-
-            if (property) {
-               await this.invalidatePropertyCaches(
-                 property.id,
-                 tokenAddress, // We know the token address
-                 property.tokenId
-               );
-               this.logger.log(`Invalidated property cache for ${property.id} (token ${tokenAddress}) due to supply change (mint/burn)`);
-            } else {
-                 // If not in DB cache, still invalidate Redis 'all' cache
-                await this.cacheService.delete(this.cacheService['CACHE_KEYS'].PROPERTIES_ALL);
-                this.logger.warn(`Token supply change for ${tokenAddress}, but property not found in DB cache for full invalidation. Invalidating ALL_PROPERTIES only.`);
+            // For the buyer, fetch the new balance and update the cache
+            const newBalance = await tokenContract.balanceOf(to);
+            const propertyDetails = await this.findNftDetailsByTokenAddressFromBlockchain(tokenAddress);
+            
+            if (propertyDetails) {
+              const userBalance = new UserPropertyBalance();
+              userBalance.userAddress = to;
+              userBalance.propertyTokenAddress = tokenAddress;
+              userBalance.propertyNftAddress = propertyDetails.nftAddress;
+              userBalance.tokenId = propertyDetails.tokenId;
+              userBalance.balance = newBalance.toString();
+              
+              await this.userPropertyBalanceRepository.upsert(userBalance, ['userAddress', 'propertyTokenAddress']);
+              this.logger.log(`Updated property balance cache for buyer ${to} and token ${tokenAddress} to ${newBalance.toString()}`);
             }
           }
         } catch (error) {
-          this.logger.error(`Error handling token transfer event for ${tokenAddress}: ${error.message}`);
+          this.logger.error(`Error handling token transfer event for ${tokenAddress}: ${error.message}`); // Updated error log message
         }
       });
     }
@@ -349,7 +333,8 @@ export class PropertiesService implements OnModuleInit {
       // No expiresAt needed here
       
       // Use upsert to avoid race conditions if called multiple times quickly
-      await this.cachedPropertyRepository.upsert(cachedProperty, ['id']);
+      // Specify the composite key for conflict resolution
+      await this.cachedPropertyRepository.upsert(cachedProperty, ['id', 'tokenId']);
       this.logger.log(`Saved/Updated property data in DB cache for NFT ${propertyDto.id}, Token ID ${propertyDto.tokenId}`);
     } catch (error) {
       this.logger.error(`Error saving property data to DB cache: ${error.message}`);
@@ -659,22 +644,36 @@ export class PropertiesService implements OnModuleInit {
       // Check database cache (no expiresAt check)
       const cachedBalances = await this.userPropertyBalanceRepository.find({
         where: { userAddress: address },
-        relations: { cachedProperty: true }, // Keep relation loading
+        // Remove automatic relation loading, we'll fetch manually
+        // relations: { cachedProperty: true }, 
       });
       
       if (cachedBalances.length > 0) {
         this.logger.log(`Found ${cachedBalances.length} balances in DB cache for user ${address}`);
         
-        const userProperties = cachedBalances
-          .filter(balance => balance.cachedProperty && balance.cachedProperty.isActive) // Ensure property exists and is active
-          .map(balance => ({
-            id: balance.propertyNftAddress,
-            tokenId: balance.tokenId,
-            tokenAddress: balance.propertyTokenAddress,
-            metadata: balance.cachedProperty.metadata,
-            totalSupply: balance.cachedProperty.totalSupply,
-            balance: balance.balance,
-          }));
+        // Manually fetch corresponding cached property for each balance
+        const userPropertiesPromises = cachedBalances.map(async (balance) => {
+          const cachedProperty = await this.cachedPropertyRepository.findOne({
+            where: { id: balance.propertyNftAddress, tokenId: balance.tokenId },
+          });
+          
+          if (cachedProperty && cachedProperty.isActive) {
+            return {
+              id: cachedProperty.id,
+              tokenId: cachedProperty.tokenId,
+              tokenAddress: cachedProperty.tokenAddress,
+              metadata: cachedProperty.metadata,
+              totalSupply: cachedProperty.totalSupply,
+              balance: balance.balance,
+            };
+          } else {
+             this.logger.warn(`Cached property not found or inactive for NFT ${balance.propertyNftAddress}, TokenID ${balance.tokenId} during DB cache retrieval for user ${address}`);
+            return null; // Exclude if property not found or inactive
+          }
+        });
+
+        const resolvedUserProperties = await Promise.all(userPropertiesPromises);
+        const userProperties = resolvedUserProperties.filter(p => p !== null) as any[];
         
         if (userProperties.length > 0) {
           this.logger.log(`Returning ${userProperties.length} properties from DB cache for user ${address}. Updating Redis.`);
@@ -726,23 +725,42 @@ export class PropertiesService implements OnModuleInit {
                 // Log the balance check result
                 this.logger.debug(`[fetchOwned] Balance check for ${property.tokenAddress} (User: ${address}): ${balance.toString()}`);
                 if (balance > BigInt(0)) {
+                  // --- Ensure CachedProperty exists before upserting UserPropertyBalance ---
+                  const ensuredProperty = await this.getPropertyDetails(property.id, property.tokenId);
+                  if (!ensuredProperty) {
+                    this.logger.error(`[fetchOwned] Failed to ensure CachedProperty exists for NFT ${property.id}, TokenID ${property.tokenId} before balance upsert. Skipping.`);
+                    return null; // Skip if we can't ensure the parent record exists
+                  }
+                  // --- End Ensure --- 
+                  
                   // Save to DB cache (without TTL) using upsert
                   const userBalance = new UserPropertyBalance();
                   userBalance.userAddress = address;
                   userBalance.propertyTokenAddress = property.tokenAddress;
-                  userBalance.propertyNftAddress = property.id;
-                  userBalance.tokenId = property.tokenId;
+                  userBalance.propertyNftAddress = ensuredProperty.id; // Use ID from the ensured property
+                  userBalance.tokenId = ensuredProperty.tokenId; // Use tokenId from the ensured property
                   userBalance.balance = balance.toString();
                   // No expiresAt
                   
+                  // Upsert the balance record, now that we know the CachedProperty exists
                   await this.userPropertyBalanceRepository.upsert(userBalance, ['userAddress', 'propertyTokenAddress']);
-                  
-                  return { ...property, balance: balance.toString() };
+                  this.logger.debug(`[fetchOwned] Upserted balance for user ${address}, token ${property.tokenAddress}`);
+
+                  // Return the DTO using ensuredProperty for consistency
+                  return { 
+                      id: ensuredProperty.id,
+                      tokenId: ensuredProperty.tokenId,
+                      tokenAddress: ensuredProperty.tokenAddress,
+                      metadata: ensuredProperty.metadata,
+                      totalSupply: ensuredProperty.totalSupply,
+                      balance: balance.toString() 
+                  };
                 }
               }
               return null; // Return null if no balance or contract error
             } catch (error) {
-              this.logger.error(`Error checking balance for property ${property.id} / token ${property.tokenAddress} for user ${address}: ${error.message}`);
+              // Log the specific error, including which property failed
+              this.logger.error(`[fetchOwned] Error checking balance or upserting for property ${property.id} / token ${property.tokenAddress} for user ${address}: ${error.message}`);
               return null; // Return null on error for this specific property
             }
          })()
@@ -758,9 +776,9 @@ export class PropertiesService implements OnModuleInit {
   
   // Modified to delete from DB cache instead of updating expiry
   async invalidatePropertyCaches(nftAddress: string, tokenAddress: string, tokenId?: number): Promise<void> {
-    this.logger.log(`CACHE INVALIDATION SKIPPED for NFT: ${nftAddress}, Token: ${tokenAddress}`);
-    return;
-    /* Original logic:
+    // Removed skip log
+    // return;
+    /* Original logic: */ // Keep comment for context if needed
     try {
       // Delete from database cache
       const deleteResult = await this.cachedPropertyRepository.delete({ id: nftAddress });
@@ -780,7 +798,7 @@ export class PropertiesService implements OnModuleInit {
     } catch (error) {
       this.logger.error(`Error invalidating property caches for ${nftAddress}: ${error.message}`);
     }
-    */
+    // */ // Keep comment end for context if needed
   }
 
   // Modified to call populateInitialPropertyCache after clearing
@@ -789,27 +807,32 @@ export class PropertiesService implements OnModuleInit {
     
     try {
       // Clear all related Redis caches
-      // await this.cacheService.delete(this.cacheService['CACHE_KEYS'].PROPERTIES_ALL);
+      await this.cacheService.reset(); // Use the CacheService reset method
+      this.logger.log('Cleared all known Redis cache keys.');
+      /* 
+      await this.cacheService.delete(this.cacheService['CACHE_KEYS'].PROPERTIES_ALL);
       // Ideally, clear individual property keys too (requires knowing all IDs or using pattern matching in Redis)
       // Example (if Redis supports KEYS or SCAN): await this.cacheService.deletePattern(this.cacheService['CACHE_KEYS'].PROPERTY + '*');
       // Example: await this.cacheService.deletePattern(this.cacheService['CACHE_KEYS'].PROPERTY_BY_TOKEN + '*');
       // Example: await this.cacheService.deletePattern(this.cacheService['CACHE_KEYS'].USER_PROPERTIES + '*');
       // For simplicity without pattern matching: Resetting 'all' forces reload on next individual request.
       this.logger.warn('SKIPPING Redis cache clear during reset/rebuild.');
-
+      */
 
       // Clear database tables
-      // await this.userPropertyBalanceRepository.clear(); // Clear dependent table first
-      // await this.cachedPropertyRepository.clear();    // Clear main table
-      this.logger.warn('SKIPPING database cache clear during reset/rebuild.');
+      await this.userPropertyBalanceRepository.clear(); // Clear dependent table first
+      await this.cachedPropertyRepository.clear();    // Clear main table
+      this.logger.log('Cleared user_property_balances and cached_properties DB tables.');
+      // this.logger.warn('SKIPPING database cache clear during reset/rebuild.');
       
       // Fetch fresh data and populate Redis cache
       this.logger.log('Attempting to repopulate cache...');
       await this.populateInitialPropertyCache();
       
-      this.logger.log('Property cache reset and rebuild initiated (invalidation/clearing skipped).');
+      this.logger.log('Property cache reset and rebuild completed.');
     } catch (error) {
       this.logger.error(`Error during property cache reset and rebuild: ${error.message}`);
+      throw error; // Re-throw error so the controller can report failure
     }
   }
 }

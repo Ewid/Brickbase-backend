@@ -8,6 +8,7 @@ import { CachedListing } from './entities/cached-listing.entity';
 import { CacheService } from '../cache/cache.service';
 import { ethers, Contract, Log, EventLog, ZeroAddress } from 'ethers';
 import { ListingDto } from './dto/listing.dto';
+import { UserPropertyBalance } from '../properties/entities/user-property-balance.entity';
 
 @Injectable()
 export class MarketplaceService implements OnModuleInit {
@@ -20,6 +21,8 @@ export class MarketplaceService implements OnModuleInit {
     private historicalSaleRepository: Repository<HistoricalSale>,
     @InjectRepository(CachedListing)
     private cachedListingRepository: Repository<CachedListing>,
+    @InjectRepository(UserPropertyBalance)
+    private userPropertyBalanceRepository: Repository<UserPropertyBalance>,
     private blockchainService: BlockchainService,
     private propertiesService: PropertiesService,
     private cacheService: CacheService,
@@ -57,26 +60,32 @@ export class MarketplaceService implements OnModuleInit {
     this.logger.log('Setting up listeners for Marketplace events (ListingPurchased, ListingCancelled, ListingCreated)...');
 
     // --- ListingPurchased Listener ---
-    propertyMarketplace.on('ListingPurchased', async (listingId, buyer, seller, amount, totalPrice, event: EventLog) => {
+    propertyMarketplace.on('ListingPurchased', async (listingId, buyer, amount, totalPrice, event: EventLog) => {
         this.logger.log(`ListingPurchased event received: listingId=${listingId}, buyer=${buyer}, amount=${amount}`);
         const listingIdNum = Number(listingId);
+        let listingDetails: ListingDto | null = null;
         try {
             // Fetch details *before* invalidating
-            const listingDetails = await this.getListingDetails(listingIdNum);
+            listingDetails = await this.getListingDetails(listingIdNum);
             if (!listingDetails) {
-                 this.logger.warn(`Could not get details for purchased listing ${listingIdNum} to record sale.`);
-                 // Attempt to invalidate cache even if details fetch failed
-                 await this.invalidateListingCache(listingIdNum);
-                 this.logger.log(`Skipping cache invalidation for purchased listing ${listingIdNum} (details not found).`);
-                 return;
+                this.logger.warn(`Could not get details for purchased listing ${listingIdNum} to record sale or invalidate seller cache.`);
+                // Attempt to invalidate listing cache even if details fetch failed
+                await this.invalidateListingCache(listingIdNum);
+                // Invalidate buyer's Redis cache anyway
+                await this.cacheService.delete(`${this.cacheService['CACHE_KEYS'].USER_PROPERTIES}${buyer}`);
+                return;
             }
+
+            // Define seller for clarity
+            const seller = listingDetails.seller;
+            const propertyTokenAddress = listingDetails.tokenAddress;
 
             // Record the historical sale
             const block = await event.getBlock();
             const sale = this.historicalSaleRepository.create({
                 propertyNftId: listingDetails.nftAddress, 
                 buyerAddress: buyer,
-                sellerAddress: seller, 
+                sellerAddress: seller, // Use seller from fetched details
                 price: parseFloat(ethers.formatUnits(totalPrice, 6)), // Assuming 6 decimals for USDC
                 currency: 'USDC',
                 transactionHash: event.transactionHash,
@@ -85,14 +94,50 @@ export class MarketplaceService implements OnModuleInit {
             await this.historicalSaleRepository.save(sale);
             this.logger.log(`Saved historical sale for listing ${listingIdNum} (NFT: ${listingDetails.nftAddress}), tx: ${event.transactionHash}`);
             
-            // Invalidate caches *after* processing
+            // Invalidate listing cache
             await this.invalidateListingCache(listingIdNum);
-            this.logger.log(`Skipping cache invalidation for purchased listing ${listingIdNum}.`);
+            
+            // --- Cache Invalidation --- 
+            // 1. Invalidate buyer's Redis cache (DB cache handled by Transfer listener in PropertiesService)
+            await this.cacheService.delete(`${this.cacheService['CACHE_KEYS'].USER_PROPERTIES}${buyer}`);
+            
+            // 2. Invalidate seller's Redis cache
+            await this.cacheService.delete(`${this.cacheService['CACHE_KEYS'].USER_PROPERTIES}${seller}`);
+            
+            // 3. Update seller's DB balance cache to 0
+            try {
+              const updateResult = await this.userPropertyBalanceRepository.update(
+                { userAddress: seller, propertyTokenAddress: propertyTokenAddress },
+                { balance: '0' }
+              );
+              if (updateResult.affected && updateResult.affected > 0) {
+                this.logger.log(`Updated seller ${seller}'s DB balance cache to 0 for token ${propertyTokenAddress}.`);
+              } else {
+                this.logger.log(`No existing DB balance cache found for seller ${seller} and token ${propertyTokenAddress} to update.`);
+                // Optionally create a record with balance 0 if it should always exist after a sale
+                // const zeroBalance = this.userPropertyBalanceRepository.create({ userAddress: seller, propertyTokenAddress: propertyTokenAddress, balance: '0', propertyNftAddress: listingDetails.nftAddress, tokenId: parseInt(listingDetails.tokenId) });
+                // await this.userPropertyBalanceRepository.save(zeroBalance);
+              }
+            } catch (dbUpdateError) {
+              this.logger.error(`Error updating seller ${seller}'s DB balance cache for token ${propertyTokenAddress}: ${dbUpdateError.message}`);
+            }
+
+            // 4. Also invalidate the specific property cache since balances changed
+            await this.cacheService.invalidatePropertyCache(listingDetails.nftAddress, parseInt(listingDetails.tokenId)); // Pass tokenId too
+            
+            this.logger.log(`Invalidated caches for listing ${listingIdNum}, buyer ${buyer}, seller ${seller}, and property ${listingDetails.nftAddress}`);
         } catch (error) {
             this.logger.error(`Error processing ListingPurchased event for listing ${listingIdNum}: ${error.message}`);
-             // Attempt to invalidate cache even on error
-             await this.invalidateListingCache(listingIdNum);
-             this.logger.log(`Skipping cache invalidation for purchased listing ${listingIdNum} (error).`);
+            // Attempt to invalidate caches even on error
+            await this.invalidateListingCache(listingIdNum);
+             // Invalidate buyer's Redis cache anyway
+             await this.cacheService.delete(`${this.cacheService['CACHE_KEYS'].USER_PROPERTIES}${buyer}`);
+            if (listingDetails?.nftAddress) {
+                await this.cacheService.invalidatePropertyCache(listingDetails.nftAddress, parseInt(listingDetails.tokenId));
+            }
+            if (listingDetails?.seller) {
+                 await this.cacheService.delete(`${this.cacheService['CACHE_KEYS'].USER_PROPERTIES}${listingDetails.seller}`);
+            }
         }
     });
     
