@@ -16,25 +16,18 @@ export class RentService {
 
     if (!rentDistribution) {
       this.logger.error('RentDistribution contract not available from BlockchainService');
-      return { amount: '0', currency: 'USDC' };
+      throw new Error('RentDistribution contract service is unavailable.');
     }
     
-    try {
-      // The contract method is now called getUnclaimedRent based on the smart contract
-      const claimable = await (rentDistribution as any).getUnclaimedRent(propertyTokenAddress, userAddress);
-      
-      // Format with 6 decimals for USDC
-      const formattedAmount = ethers.formatUnits(claimable, 6);
-      this.logger.debug(`Claimable rent amount: ${formattedAmount} USDC`);
-      
-      return { 
-        amount: claimable.toString(),
-        currency: 'USDC'
-      };
-    } catch (error) {
-      this.logger.error(`Error fetching claimable rent for ${userAddress} on ${propertyTokenAddress}: ${error.message}`);
-      return { amount: '0', currency: 'USDC' };
-    }
+    const claimable = await (rentDistribution as any).getUnclaimedRent(propertyTokenAddress, userAddress);
+    
+    const formattedAmount = ethers.formatUnits(claimable, 6);
+    this.logger.debug(`Claimable rent amount retrieved from contract: ${formattedAmount} USDC (Raw: ${claimable.toString()})`);
+    
+    return { 
+      amount: claimable.toString(),
+      currency: 'USDC'
+    };
   }
   
   // Implement claimRent function for frontend integration
