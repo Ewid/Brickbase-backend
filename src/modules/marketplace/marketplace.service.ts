@@ -80,19 +80,50 @@ export class MarketplaceService implements OnModuleInit {
             const seller = listingDetails.seller;
             const propertyTokenAddress = listingDetails.tokenAddress;
 
-            // Record the historical sale
+            // Get block timestamp
             const block = await event.getBlock();
+            const timestamp = new Date(block.timestamp * 1000);
+
+            // Get transaction hash (handle potential missing value)
+            let txHash = event.transactionHash;
+            if (!txHash) {
+                this.logger.warn(`Transaction hash missing from ListingPurchased event log for listing ${listingIdNum}. Attempting to fetch receipt...`);
+                try {
+                    const txReceipt = await event.getTransactionReceipt();
+                    if (txReceipt) {
+                      txHash = txReceipt.hash;
+                      this.logger.log(`Successfully fetched transaction hash ${txHash} from receipt.`);
+                    } else {
+                        this.logger.error(`Could not fetch transaction receipt for ListingPurchased event (listing ${listingIdNum}). Cannot record historical sale.`);
+                        // Optionally, still attempt cache invalidation before returning
+                        await this.invalidateListingCache(listingIdNum);
+                        await this.cacheService.delete(`${this.cacheService['CACHE_KEYS'].USER_PROPERTIES}${buyer}`);
+                        await this.cacheService.delete(`${this.cacheService['CACHE_KEYS'].USER_PROPERTIES}${seller}`);
+                        return; // Exit if hash cannot be obtained
+                    }
+                } catch (receiptError) {
+                    this.logger.error(`Error fetching transaction receipt for ListingPurchased event (listing ${listingIdNum}): ${receiptError.message}. Cannot record historical sale.`);
+                     // Optionally, still attempt cache invalidation before returning
+                    await this.invalidateListingCache(listingIdNum);
+                    await this.cacheService.delete(`${this.cacheService['CACHE_KEYS'].USER_PROPERTIES}${buyer}`);
+                    await this.cacheService.delete(`${this.cacheService['CACHE_KEYS'].USER_PROPERTIES}${seller}`);
+                    return; // Exit if hash cannot be obtained
+                }
+            }
+
+            // Record the historical sale
             const sale = this.historicalSaleRepository.create({
-                propertyNftId: listingDetails.nftAddress, 
+                propertyNftId: listingDetails.nftAddress,
                 buyerAddress: buyer,
-                sellerAddress: seller, // Use seller from fetched details
+                sellerAddress: seller,
                 price: parseFloat(ethers.formatUnits(totalPrice, 6)), // Assuming 6 decimals for USDC
                 currency: 'USDC',
-                transactionHash: event.transactionHash,
-                timestamp: new Date(block.timestamp * 1000),
+                transactionHash: txHash, // Use the obtained hash
+                timestamp: timestamp, // Use the obtained timestamp
             });
+            this.logger.log(`[MarketplaceService] Attempting to save historical sale: ${JSON.stringify(sale)}`);
             await this.historicalSaleRepository.save(sale);
-            this.logger.log(`Saved historical sale for listing ${listingIdNum} (NFT: ${listingDetails.nftAddress}), tx: ${event.transactionHash}`);
+            this.logger.log(`[MarketplaceService] Successfully saved historical sale for listing ${listingIdNum} (NFT: ${listingDetails.nftAddress}), tx: ${txHash}`);
             
             // Invalidate listing cache
             await this.invalidateListingCache(listingIdNum);

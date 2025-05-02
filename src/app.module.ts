@@ -10,6 +10,7 @@ import { InstallmentsModule } from './modules/installments/installments.module';
 import { BlockchainModule } from './modules/blockchain/blockchain.module';
 import { DatabaseModule } from './modules/database/database.module';
 import { CacheModule } from './modules/cache/cache.module';
+import { TransactionsModule } from './modules/transactions/transactions.module';
 import { join } from 'path';
 
 @Module({
@@ -37,6 +38,7 @@ import { join } from 'path';
     InstallmentsModule,
     BlockchainModule,
     DatabaseModule,
+    TransactionsModule,
   ],
 })
 export class AppModule {}

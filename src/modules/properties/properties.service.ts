@@ -556,25 +556,6 @@ export class PropertiesService implements OnModuleInit {
     }
 
     try {
-      // Attempt direct lookup if available (ideal scenario)
-      try {
-        const propertyInfo = await (propertyRegistry as any).getPropertyByToken(tokenAddress);
-        if (propertyInfo && propertyInfo.propertyNFT && propertyInfo.propertyNFT !== ZeroAddress) {
-          const tokenId = Number(propertyInfo.tokenId); // Ensure conversion
-          this.logger.log(`Found property directly via getPropertyByToken for token ${tokenAddress}: NFT ${propertyInfo.propertyNFT}, tokenId ${tokenId}`);
-          // Verify it's active before returning
-           const propData: RegisteredProperty = await (propertyRegistry as any).registeredProperties(tokenId);
-           if (propData.isActive) {
-                return { nftAddress: propertyInfo.propertyNFT, tokenId: tokenId };
-           } else {
-                this.logger.warn(`Direct lookup found inactive property for token ${tokenAddress}.`);
-                return null;
-           }
-        }
-      } catch (directLookupError) {
-        this.logger.debug(`Direct property lookup via getPropertyByToken failed or not available, falling back to iteration: ${directLookupError.message}`);
-      }
-
       // Fallback: Iterate through all registered properties
       this.logger.debug(`Iterating through registered properties to find token ${tokenAddress}...`);
       const allRegisteredProps: RegisteredProperty[] = await (propertyRegistry as any).getAllProperties();
@@ -658,6 +639,7 @@ export class PropertiesService implements OnModuleInit {
           });
           
           if (cachedProperty && cachedProperty.isActive) {
+
             return {
               id: cachedProperty.id,
               tokenId: cachedProperty.tokenId,
@@ -746,12 +728,15 @@ export class PropertiesService implements OnModuleInit {
                   await this.userPropertyBalanceRepository.upsert(userBalance, ['userAddress', 'propertyTokenAddress']);
                   this.logger.debug(`[fetchOwned] Upserted balance for user ${address}, token ${property.tokenAddress}`);
 
+                  // Extract physical address from metadata
+                  const physicalAddress = ensuredProperty.metadata?.physicalAddress || 'N/A';
                   // Return the DTO using ensuredProperty for consistency
                   return { 
                       id: ensuredProperty.id,
                       tokenId: ensuredProperty.tokenId,
                       tokenAddress: ensuredProperty.tokenAddress,
                       metadata: ensuredProperty.metadata,
+                      physicalAddress: physicalAddress,
                       totalSupply: ensuredProperty.totalSupply,
                       balance: balance.toString() 
                   };
