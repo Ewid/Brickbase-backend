@@ -116,6 +116,7 @@ export class MarketplaceService implements OnModuleInit {
                 propertyNftId: listingDetails.nftAddress,
                 buyerAddress: buyer,
                 sellerAddress: seller,
+                tokenAmount: amount.toString(),
                 price: parseFloat(ethers.formatUnits(totalPrice, 6)), // Assuming 6 decimals for USDC
                 currency: 'USDC',
                 transactionHash: txHash, // Use the obtained hash

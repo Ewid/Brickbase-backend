@@ -76,6 +76,7 @@ export class TransactionsService {
         propertyName: propertyName, // Add fetched name
         propertyTokenAddress: propertyTokenAddress, // Add fetched token address
         amount: sale.price, // Use the number directly
+        tokenAmount: sale.tokenAmount, // <-- Add the token amount
         currency: sale.currency,
         timestamp: sale.timestamp,
         transactionHash: sale.transactionHash,

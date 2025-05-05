@@ -14,8 +14,11 @@ export class HistoricalSale {
   @Column()
   sellerAddress: string;
 
+  @Column({ type: 'varchar' }) // Store token amount as string (from BigInt)
+  tokenAmount: string;
+
   @Column('decimal', { precision: 18, scale: 6 }) // Adjust precision/scale as needed
-  price: number;
+  price: number; // This is the total price in USDC
 
   @Column()
   currency: string; // e.g., 'ETH' or token address

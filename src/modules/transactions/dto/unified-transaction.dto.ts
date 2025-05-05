@@ -1,4 +1,4 @@
-import { IsString, IsNotEmpty, IsNumber, IsDate, IsEnum } from 'class-validator';
+import { IsString, IsNotEmpty, IsNumber, IsDate, IsEnum, IsOptional } from 'class-validator';
 
 export enum TransactionType {
   PURCHASE = 'Purchase',
@@ -26,6 +26,10 @@ export class UnifiedTransactionDto {
 
   @IsNumber()
   amount: number; // Value of the transaction (e.g., sale price or rent amount)
+
+  @IsString()
+  @IsOptional()
+  tokenAmount?: string; // Optional: Number of tokens for purchase/sale
 
   @IsString()
   @IsNotEmpty()
