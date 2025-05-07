@@ -16,14 +16,11 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
     rentDistribution?: Contract;
     propertyMarketplace?: Contract;
     propertyDAO?: Contract;
-    // Add USDC token
     usdcToken?: Contract;
-    // Individual property tokens
-    mbvToken?: Contract;
-    mlcToken?: Contract;
-    sfmtToken?: Contract;
-    cdpToken?: Contract;
+    // Individual property tokens are now handled dynamically
   } = {};
+  // Map to store dynamically loaded property token contracts, keyed by lowercase address
+  private propertyTokenContracts: Map<string, Contract> = new Map();
 
   constructor(private configService: ConfigService) {}
 
@@ -38,21 +35,23 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
     try {
       this.provider = new ethers.WebSocketProvider(rpcUrl);
 
-      // Wait for the provider to be ready (initial connection)
       await this.provider.ready;
       this.logger.log('WebSocket Provider is ready.');
       this.providerReady = true;
-      this.initializeContracts();
+      await this.initializeCoreContracts(); // Renamed for clarity
+      await this.initializeAllPropertyTokens(); // New method call
     } catch (error) {
-      this.logger.error(`Failed to initialize WebSocket provider: ${error.message}`);
-      this.provider = null; // Ensure provider is null if connection failed
-       this.providerReady = false;
+      this.logger.error(`Failed to initialize WebSocket provider or contracts: ${error.message}`);
+      this.provider = null;
+      this.providerReady = false;
     }
   }
 
   async onModuleDestroy() {
     if (this.provider) {
       this.logger.log('Closing WebSocket Provider connection...');
+      // propertyTokenContracts are derived from provider, no need to clear explicitly before provider.destroy()
+      this.propertyTokenContracts.clear();
       await this.provider.destroy();
       this.provider = null;
       this.providerReady = false;
@@ -60,12 +59,12 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private initializeContracts() {
+  private async initializeCoreContracts() { // Renamed from initializeContracts
     if (!this.provider || !this.providerReady) {
-      this.logger.error('Cannot initialize contracts: Provider is not ready.');
+      this.logger.error('Cannot initialize core contracts: Provider is not ready.');
       return;
     }
-    const abiDirectory = path.join(__dirname, '../../abis'); // Assumes abis folder is at dist/abis
+    const abiDirectory = path.join(__dirname, '../../abis');
     const contractConfigs = [
       { name: 'propertyTokenFactory', addressEnv: 'PROPERTY_TOKEN_FACTORY_ADDRESS', abiFile: 'PropertyTokenFactory.json' },
       { name: 'propertyNFT', addressEnv: 'PROPERTY_NFT_ADDRESS', abiFile: 'PropertyNFT.json' },
@@ -73,36 +72,73 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
       { name: 'rentDistribution', addressEnv: 'RENT_DISTRIBUTION_ADDRESS', abiFile: 'RentDistribution.json' },
       { name: 'propertyMarketplace', addressEnv: 'PROPERTY_MARKETPLACE_ADDRESS', abiFile: 'PropertyMarketplace.json' },
       { name: 'propertyDAO', addressEnv: 'PROPERTY_DAO_ADDRESS', abiFile: 'PropertyDAO.json' },
-      // USDC token (using ERC20 ABI)
       { name: 'usdcToken', addressEnv: 'USDC_TOKEN_ADDRESS', abiFile: 'ERC20.json' },
-      // Individual property tokens (all use PropertyToken ABI)
-      { name: 'mbvToken', addressEnv: 'MBV_TOKEN_ADDRESS', abiFile: 'PropertyToken.json' },
-      { name: 'mlcToken', addressEnv: 'MLC_TOKEN_ADDRESS', abiFile: 'PropertyToken.json' },
-      { name: 'sfmtToken', addressEnv: 'SFMT_TOKEN_ADDRESS', abiFile: 'PropertyToken.json' },
-      { name: 'cdpToken', addressEnv: 'CDP_TOKEN_ADDRESS', abiFile: 'PropertyToken.json' },
+      // Removed MBV, MLC, SFMT, CDP specific entries
     ];
 
-    contractConfigs.forEach(config => {
+    for (const config of contractConfigs) {
       const address = this.configService.get<string>(config.addressEnv);
       const abiPath = path.join(abiDirectory, config.abiFile);
 
       if (!address) {
-        this.logger.warn(`${config.addressEnv} address not found in config.`);
-        return;
+        this.logger.warn(`${config.addressEnv} address not found in config for ${config.name}.`);
+        continue; // Use continue instead of return to process other configs
       }
       if (!fs.existsSync(abiPath)) {
-        this.logger.error(`ABI file not found at runtime path: ${abiPath}`);
-        return;
+        this.logger.error(`ABI file not found at runtime path for ${config.name}: ${abiPath}`);
+        continue;
       }
 
       try {
         const abi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
         this.contracts[config.name] = new ethers.Contract(address, abi, this.provider);
-        this.logger.log(`Initialized contract ${config.name} at ${address}`);
+        this.logger.log(`Initialized core contract ${config.name} at ${address}`);
       } catch (error) {
-        this.logger.error(`Failed to initialize contract ${config.name}: ${error.message}`);
+        this.logger.error(`Failed to initialize core contract ${config.name}: ${error.message}`);
       }
-    });
+    }
+  }
+
+  private async initializeAllPropertyTokens() {
+    if (!this.provider || !this.providerReady) {
+      this.logger.error('Cannot initialize property tokens: Provider is not ready.');
+      return;
+    }
+    const propertyTokenFactory = this.contracts.propertyTokenFactory;
+    if (!propertyTokenFactory) {
+      this.logger.error('PropertyTokenFactory contract is not initialized. Cannot fetch all property tokens.');
+      return;
+    }
+
+    const abiDirectory = path.join(__dirname, '../../abis');
+    const propertyTokenAbiPath = path.join(abiDirectory, 'PropertyToken.json');
+    if (!fs.existsSync(propertyTokenAbiPath)) {
+      this.logger.error(`PropertyToken ABI file not found at ${propertyTokenAbiPath}. Cannot initialize dynamic property tokens.`);
+      return;
+    }
+    const propertyTokenAbi = JSON.parse(fs.readFileSync(propertyTokenAbiPath, 'utf8'));
+
+    try {
+      this.logger.log('Fetching all property token addresses from PropertyTokenFactory...');
+      const tokenAddresses: string[] = await propertyTokenFactory.getAllTokens();
+      this.logger.log(`Found ${tokenAddresses.length} property token addresses from factory.`);
+
+      for (const address of tokenAddresses) {
+        try {
+          const contractInstance = new ethers.Contract(address, propertyTokenAbi, this.provider);
+          // Optional: Fetch symbol to log more descriptively, but adds async calls
+          // const symbol = await contractInstance.symbol();
+          // this.logger.log(`Initialized dynamic PropertyToken (${symbol || 'N/A'}) at ${address}`);
+          this.logger.log(`Initialized dynamic PropertyToken at ${address}`);
+          this.propertyTokenContracts.set(address.toLowerCase(), contractInstance);
+        } catch (error) {
+          this.logger.error(`Failed to initialize dynamic PropertyToken at ${address}: ${error.message}`);
+        }
+      }
+      this.logger.log(`Finished initializing ${this.propertyTokenContracts.size} dynamic property tokens.`);
+    } catch (error) {
+      this.logger.error(`Error fetching or initializing dynamic property tokens: ${error.message}`);
+    }
   }
 
   getProvider(): Provider | null {
@@ -111,50 +147,43 @@ export class BlockchainService implements OnModuleInit, OnModuleDestroy {
 
   getContract(name: keyof BlockchainService['contracts']): Contract | undefined {
     if (!this.providerReady) {
-        this.logger.warn(`Attempted to get contract ${name} before provider is ready.`);
-        return undefined;
+      this.logger.warn(`Attempted to get core contract ${name} before provider is ready.`);
+      return undefined;
     }
     if (!this.contracts[name]) {
-        this.logger.warn(`Attempted to access uninitialized or unavailable contract: ${name}`);
-     }
+      this.logger.warn(`Attempted to access uninitialized or unavailable core contract: ${name}`);
+    }
     return this.contracts[name];
   }
 
-  // Helper to get a property token by its type or address
-  getPropertyTokenByType(propertyType: string): Contract | undefined {
-    switch (propertyType.toLowerCase()) {
-      case 'mbv':
-      case 'miami':
-        return this.contracts.mbvToken;
-      case 'mlc':
-      case 'manhattan':
-        return this.contracts.mlcToken;
-      case 'sfmt':
-      case 'san francisco':
-        return this.contracts.sfmtToken;
-      case 'cdp':
-      case 'chicago':
-        return this.contracts.cdpToken;
-      default:
+  // Get a property token contract by its address (dynamically loaded)
+  getPropertyTokenByAddress(address: string): Contract | undefined {
+    if (!this.providerReady) {
+      this.logger.warn(`Attempted to get property token ${address} before provider is ready.`);
+      return undefined;
+    }
+    if (!address) {
+        this.logger.warn('getPropertyTokenByAddress called with no address.');
         return undefined;
     }
+    const normalizedAddress = address.toLowerCase();
+    const contract = this.propertyTokenContracts.get(normalizedAddress);
+    if (!contract) {
+        this.logger.warn(`PropertyToken contract not found for address: ${address} (Normalized: ${normalizedAddress}). Available: ${Array.from(this.propertyTokenContracts.keys()).join(', ')}`);
+    }
+    return contract;
   }
 
-  // Get a token contract by its address
-  getPropertyTokenByAddress(address: string): Contract | undefined {
-    if (!address) return undefined;
-    
-    // Normalize the address for comparison
-    const normalizedAddress = address.toLowerCase();
-    
-    // Check each property token
-    for (const key of ['mbvToken', 'mlcToken', 'sfmtToken', 'cdpToken']) {
-      const contract = this.contracts[key];
-      if (contract && contract.target.toLowerCase() === normalizedAddress) {
-        return contract;
-      }
+  // Helper to get all dynamically loaded property token contracts
+  getAllPropertyTokenContracts(): Contract[] {
+    if (!this.providerReady) {
+        this.logger.warn('Attempted to get all property tokens before provider is ready.');
+        return [];
     }
-    
-    return undefined;
+    return Array.from(this.propertyTokenContracts.values());
   }
+  
+  // getPropertyTokenByType might be deprecated or need rework if type isn't directly available.
+  // For now, it's removed as dynamic loading focuses on addresses.
+  // If symbols are reliably fetched and mapped, it could be revived.
 } 

@@ -32,7 +32,8 @@ interface PropertyDetailsFromContract {
 export class PropertiesService implements OnModuleInit {
   private readonly logger = new Logger(PropertiesService.name);
   private ipfsGatewayUrl: string;
-  private readonly tokenAddresses: string[] = [];
+  // tokenAddresses is no longer populated from config for individual tokens here
+  // It will be dynamically obtained from BlockchainService for listeners
   private readonly ALL_PROPERTIES_CACHE_TTL = 86400; // 24 hours in seconds
   private readonly INDIVIDUAL_PROPERTY_CACHE_TTL = 86400; // 24 hours
   private readonly USER_BALANCE_CACHE_TTL = 900; // 15 minutes
@@ -50,17 +51,16 @@ export class PropertiesService implements OnModuleInit {
     if (!this.ipfsGatewayUrl.endsWith('/')) {
         this.ipfsGatewayUrl += '/';
     }
-    
-    // Collect token addresses from environment config
-    this.tokenAddresses = [
-      this.configService.get<string>('MBV_TOKEN_ADDRESS', ''),
-      this.configService.get<string>('MLC_TOKEN_ADDRESS', ''),
-      this.configService.get<string>('SFMT_TOKEN_ADDRESS', ''),
-      this.configService.get<string>('CDP_TOKEN_ADDRESS', ''),
-    ].filter(address => address && address !== '');
+    // Removed initialization of this.tokenAddresses from config
   }
   
   async onModuleInit() {
+    // Wait for blockchain service to be fully ready, including dynamic tokens
+    // A more robust way might involve an event or a ready flag from BlockchainService if init is long
+    // For now, a small delay or assuming BlockchainService completes init first.
+    // However, onModuleInit in NestJS services are called in order, so this should be okay if BlockchainModule is imported before PropertiesModule.
+    // To be safer, we can check if property tokens are loaded in setupTokenTransferListeners.
+
     this.listenToPropertyEvents();
     this.logger.log('PropertiesService initialized, starting initial cache population...');
     this.populateInitialPropertyCache().catch(error => {
@@ -93,7 +93,7 @@ export class PropertiesService implements OnModuleInit {
     this.setupTokenTransferListeners();
   }
   
-  private setupRegistryListeners() {
+  private async setupRegistryListeners() {
     const propertyRegistry = this.blockchainService.getContract('propertyRegistry');
     
     if (!propertyRegistry) {
@@ -101,38 +101,42 @@ export class PropertiesService implements OnModuleInit {
       return;
     }
     
-    // Listen for property registrations
-    propertyRegistry.on('PropertyRegistered', async (propertyNftAddress, propertyTokenAddress, event: EventLog) => {
-      this.logger.log(`PropertyRegistered event: NFT=${propertyNftAddress}, Token=${propertyTokenAddress}`);
+    propertyRegistry.on('PropertyRegistered', async (propertyNftAddress, tokenId, propertyTokenAddress, event: EventLog) => {
+      this.logger.log(`PropertyRegistered event: NFT=${propertyNftAddress}, TokenId=${tokenId}, Token=${propertyTokenAddress}`);
       
-      // Invalidate the all properties cache - let the next request repopulate
       await this.cacheService.delete(this.cacheService['CACHE_KEYS'].PROPERTIES_ALL);
-      // Optionally fetch and add the new property immediately
-      // await this.getPropertyDetails(propertyNftAddress); // This would fetch and cache it
       this.logger.log('Invalidated properties list cache due to new property registration.');
+
+      const tokenContract = this.blockchainService.getPropertyTokenByAddress(propertyTokenAddress);
+      if (tokenContract) {
+        const listeners = await tokenContract.listeners('Transfer');
+        if (listeners.length === 0) { 
+          this.logger.log(`Setting up new Transfer event listener for dynamically registered token ${propertyTokenAddress}`);
+          this.setupSpecificTokenTransferListener(tokenContract);
+        }
+      } else if (!tokenContract) {
+        this.logger.warn(`PropertyRegistered event for token ${propertyTokenAddress}, but contract instance not yet available in BlockchainService. Listener may be missed or set up later.`);
+      }
     });
     
-    // Listen for property status changes (active/inactive)
-    propertyRegistry.on('PropertyStatusChanged', async (propertyNftAddress, isActive, event: EventLog) => {
-      this.logger.log(`PropertyStatusChanged event: NFT=${propertyNftAddress}, isActive=${isActive}`);
+    propertyRegistry.on('PropertyStatusChanged', async (propertyNftAddress, tokenId, isActive, event: EventLog) => {
+      this.logger.log(`PropertyStatusChanged event: NFT=${propertyNftAddress}, TokenId=${tokenId}, isActive=${isActive}`);
       
       try {
-        // Find the property details needed for invalidation
         const cachedProperty = await this.cachedPropertyRepository.findOne({
-          where: { id: propertyNftAddress },
-          select: ['tokenAddress', 'tokenId'] // Select only needed fields
+          where: { id: propertyNftAddress, tokenId: Number(tokenId) }, 
+          select: ['tokenAddress'] 
         });
         
         if (cachedProperty) {
           await this.invalidatePropertyCaches(
             propertyNftAddress, 
             cachedProperty.tokenAddress, 
-            cachedProperty.tokenId
+            Number(tokenId) 
           );
         } else {
-           // If not in DB cache, still invalidate Redis 'all' cache
            await this.cacheService.delete(this.cacheService['CACHE_KEYS'].PROPERTIES_ALL);
-           this.logger.warn(`PropertyStatusChanged for ${propertyNftAddress}, but property not found in DB cache. Invalidating ALL_PROPERTIES only.`);
+           this.logger.warn(`PropertyStatusChanged for ${propertyNftAddress} (TokenId: ${tokenId}), but property not found in DB cache. Invalidating ALL_PROPERTIES only.`);
         }
       } catch (error) {
         this.logger.error(`Error handling PropertyStatusChanged event: ${error.message}`);
@@ -148,18 +152,13 @@ export class PropertiesService implements OnModuleInit {
       return;
     }
     
-    // Listen for metadata updates
     propertyNFT.on('MetadataUpdate', async (tokenId, event: EventLog) => {
       this.logger.log(`MetadataUpdate event for tokenId=${tokenId}`);
-      
+      const tokenIdNum = Number(tokenId);
       try {
-        // Convert tokenId to number
-        const tokenIdNum = Number(tokenId);
-        
-        // Find the property details needed for invalidation
         const cachedProperty = await this.cachedPropertyRepository.findOne({
           where: { tokenId: tokenIdNum },
-          select: ['id', 'tokenAddress'] // Select only needed fields
+          select: ['id', 'tokenAddress']
         });
         
         if (cachedProperty) {
@@ -170,7 +169,6 @@ export class PropertiesService implements OnModuleInit {
           );
            this.logger.log(`Invalidated caches for property with tokenId ${tokenIdNum} due to metadata update`);
         } else {
-            // If not in DB cache, still invalidate Redis 'all' cache
            await this.cacheService.delete(this.cacheService['CACHE_KEYS'].PROPERTIES_ALL);
            this.logger.warn(`MetadataUpdate for tokenId ${tokenIdNum}, but property not found in DB cache for full invalidation. Invalidating ALL_PROPERTIES only.`);
         }
@@ -179,16 +177,13 @@ export class PropertiesService implements OnModuleInit {
       }
     });
     
-    // Listen for NFT transfers (although these should be rare in this system)
     propertyNFT.on('Transfer', async (from, to, tokenId, event: EventLog) => {
       this.logger.log(`NFT Transfer event: tokenId=${tokenId}, from=${from}, to=${to}`);
-      
+      const tokenIdNum = Number(tokenId);
       try {
-        const tokenIdNum = Number(tokenId);
-        // Find the property details needed for invalidation
         const cachedProperty = await this.cachedPropertyRepository.findOne({
            where: { tokenId: tokenIdNum },
-           select: ['id', 'tokenAddress'] // Select only needed fields
+           select: ['id', 'tokenAddress']
         });
         
         if (cachedProperty) {
@@ -199,7 +194,6 @@ export class PropertiesService implements OnModuleInit {
           );
           this.logger.log(`Invalidated caches for property with tokenId ${tokenIdNum} due to NFT transfer`);
         } else {
-            // If not in DB cache, still invalidate Redis 'all' cache
            await this.cacheService.delete(this.cacheService['CACHE_KEYS'].PROPERTIES_ALL);
            this.logger.warn(`NFT Transfer for tokenId ${tokenIdNum}, but property not found in DB cache for full invalidation. Invalidating ALL_PROPERTIES only.`);
         }
@@ -209,46 +203,68 @@ export class PropertiesService implements OnModuleInit {
     });
   }
   
-  private setupTokenTransferListeners() {
-    // Listen for ERC20 token transfers (affects user balances)
-    for (const tokenAddress of this.tokenAddresses) {
-      const tokenContract = this.blockchainService.getPropertyTokenByAddress(tokenAddress);
-      
-      if (!tokenContract) {
-        this.logger.warn(`Cannot listen for token transfers: Token contract not available for ${tokenAddress}`);
+  private async setupTokenTransferListeners() {
+    this.logger.log('Setting up token transfer event listeners for dynamically loaded property tokens...');
+    const allTokenContracts = this.blockchainService.getAllPropertyTokenContracts();
+
+    if (!allTokenContracts || allTokenContracts.length === 0) {
+        this.logger.warn('No property token contracts found in BlockchainService to set up listeners. This might be a timing issue or BlockchainService init incomplete.');
+        return;
+    }
+
+    this.logger.log(`Found ${allTokenContracts.length} property token contracts to listen to.`);
+
+    for (const tokenContract of allTokenContracts) {
+      if (!tokenContract || !tokenContract.target) {
+        this.logger.warn('Encountered an undefined or targetless token contract instance while setting up listeners.');
         continue;
       }
-      
-      this.logger.log(`Setting up transfer event listener for token ${tokenAddress}`);
-      
-      tokenContract.on('Transfer', async (from, to, amount, event: EventLog) => {
-        this.logger.log(`Token Transfer event on ${tokenAddress}: from=${from}, to=${to}, amount=${amount}`);
-        
-        try {
-          // Keep the 'to' address handling block (for the buyer/recipient)
-          if (to !== ZeroAddress) {
-            await this.cacheService.delete(`${this.cacheService['CACHE_KEYS'].USER_PROPERTIES}${to}`);
-            // For the buyer, fetch the new balance and update the cache
-            const newBalance = await tokenContract.balanceOf(to);
-            const propertyDetails = await this.findNftDetailsByTokenAddressFromBlockchain(tokenAddress);
-            
-            if (propertyDetails) {
-              const userBalance = new UserPropertyBalance();
-              userBalance.userAddress = to;
-              userBalance.propertyTokenAddress = tokenAddress;
-              userBalance.propertyNftAddress = propertyDetails.nftAddress;
-              userBalance.tokenId = propertyDetails.tokenId;
-              userBalance.balance = newBalance.toString();
-              
-              await this.userPropertyBalanceRepository.upsert(userBalance, ['userAddress', 'propertyTokenAddress']);
-              this.logger.log(`Updated property balance cache for buyer ${to} and token ${tokenAddress} to ${newBalance.toString()}`);
-            }
-          }
-        } catch (error) {
-          this.logger.error(`Error handling token transfer event for ${tokenAddress}: ${error.message}`); // Updated error log message
-        }
-      });
+      const existingListeners = await tokenContract.listeners('Transfer');
+      if (existingListeners.length === 0) {
+          this.setupSpecificTokenTransferListener(tokenContract);
+      } else {
+          this.logger.debug(`Transfer listener already exists for token ${tokenContract.target}. Skipping setup.`);
+      }
     }
+  }
+
+  private setupSpecificTokenTransferListener(tokenContract: Contract) {
+    const tokenAddress = tokenContract.target as string; 
+    this.logger.log(`Setting up Transfer event listener for token ${tokenAddress}`);
+
+    tokenContract.on('Transfer', async (from: string, to: string, amount: ethers.BigNumberish, event: EventLog) => {
+      this.logger.log(`Token Transfer event on ${tokenAddress}: from=${from}, to=${to}, amount=${amount.toString()}`);
+      
+      try {
+        if (from !== ZeroAddress) {
+          await this.cacheService.delete(`${this.cacheService['CACHE_KEYS'].USER_PROPERTIES}${from}`);
+          this.logger.debug(`Invalidated Redis user property cache for sender ${from} of token ${tokenAddress}`);
+        }
+
+        if (to !== ZeroAddress) {
+          await this.cacheService.delete(`${this.cacheService['CACHE_KEYS'].USER_PROPERTIES}${to}`);
+          
+          const newBalance = await tokenContract.balanceOf(to);
+          const propertyDetails = await this.findNftDetailsByTokenAddress(tokenAddress);
+          
+          if (propertyDetails) {
+            const userBalance = new UserPropertyBalance();
+            userBalance.userAddress = to;
+            userBalance.propertyTokenAddress = tokenAddress;
+            userBalance.propertyNftAddress = propertyDetails.nftAddress;
+            userBalance.tokenId = propertyDetails.tokenId;
+            userBalance.balance = newBalance.toString();
+            
+            await this.userPropertyBalanceRepository.upsert(userBalance, ['userAddress', 'propertyTokenAddress']);
+            this.logger.log(`Updated property balance DB cache for recipient ${to} and token ${tokenAddress} to ${newBalance.toString()}`);
+          } else {
+            this.logger.warn(`Could not find NFT details for token ${tokenAddress} while updating balance for ${to}. DB cache for balance might be incomplete.`);
+          }
+        }
+      } catch (error) {
+        this.logger.error(`Error handling token Transfer event for ${tokenAddress} (From: ${from}, To: ${to}): ${error.message}`);
+      }
+    });
   }
 
   private async fetchMetadata(uri: string): Promise<any> {
