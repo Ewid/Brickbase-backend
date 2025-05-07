@@ -11,7 +11,6 @@ import { BlockchainModule } from './modules/blockchain/blockchain.module';
 import { DatabaseModule } from './modules/database/database.module';
 import { CacheModule } from './modules/cache/cache.module';
 import { TransactionsModule } from './modules/transactions/transactions.module';
-import { TestModule } from './modules/test/test.module';
 import { join } from 'path';
 
 @Module({
@@ -26,18 +25,7 @@ import { join } from 'path';
         type: 'postgres',
         url: configService.get<string>('DATABASE_URL'),
         entities: [join(__dirname, '**', '*.entity.js')],
-        // Modifications for Vercel deployment:
-        synchronize: configService.get('NODE_ENV') !== 'production', // Only synchronize in non-production
-        ssl: configService.get('NODE_ENV') === 'production' 
-          ? { rejectUnauthorized: false } 
-          : false,
-        keepConnectionAlive: false, // Important for serverless
-        extra: {
-          poolSize: 1, // Minimize connections for serverless
-          max: 20, // Maximum connections in the pool
-          connectionTimeoutMillis: 5000 // Connection timeout
-        },
-        autoLoadEntities: true, // Auto-load entities
+        synchronize:true,
       }),
       inject: [ConfigService],
     }),
@@ -51,7 +39,6 @@ import { join } from 'path';
     BlockchainModule,
     DatabaseModule,
     TransactionsModule,
-    TestModule,
   ],
 })
 export class AppModule {}

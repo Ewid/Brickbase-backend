@@ -6,7 +6,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   app.enableCors({
-    origin: process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : '*',
+    origin: ['http://localhost:3001'],
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
   });
@@ -17,16 +17,7 @@ async function bootstrap() {
     transform: true,
   }));
 
-  // Use Vercel's PORT environment variable if available
-  const port = process.env.PORT || 3000;
-  await app.listen(port);
-  console.log(`Application is running on port ${port}`);
+  await app.listen(3000);
 }
 
-// Only run bootstrap in local development, not on Vercel serverless
-if (process.env.NODE_ENV !== 'production') {
-  bootstrap();
-}
-
-// Export for serverless use
-export default bootstrap;
+bootstrap();
