@@ -7,6 +7,7 @@ import { Server } from 'http';
 // Add crypto polyfill for Node.js on Vercel
 import crypto from 'crypto';
 if (!crypto.randomUUID) {
+  // @ts-ignore - Fix later: Type mismatch with UUID function
   crypto.randomUUID = function() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
       const r = Math.random() * 16 | 0;
